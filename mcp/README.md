@@ -51,5 +51,5 @@ Same JSON block as above.
 Built on MCP Python SDK v2 (`mcp.server.mcpserver.MCPServer`) and `databricks-sql-connector`.
 Queries are shared with `../notebook/dbu_waste_finder.py`. Validated live (trial workspace, Statement API runner, 2026-10-26):
 `cost_summary`, `top_cost_drivers`, `explain_cost_spike`, `find_waste` → `idle_warehouse`, `warehouse_long_autostop`, `serverless_jobs`
-(runs/failed and the billed DBUs that had landed; see root README). Not yet validated live: classic-cluster checks, idle-warehouse USD, `propose_fix` against a real bundle deploy, and the
+(runs/failed and the billed DBUs that had landed; see root README). Not yet validated live: classic-cluster checks, `propose_fix` against a real bundle deploy, and the
 `databricks-sql-connector` path.

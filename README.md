@@ -63,10 +63,12 @@ the MCP server tests (mocked query results) and landing-page checks. No workspac
   found the test warehouse (77 min up, 2 busy min); `warehouse_long_autostop` found it after deletion; cost tools returned DBUs
   with USD unknown for an unpriced SKU.
 - Not yet validated live: the classic-cluster checks (jobs on all-purpose, auto-termination, idle clusters) — the trial workspace
-  cannot run classic clusters — and idle-warehouse USD (the deleted test warehouse had no billing rows yet).
-- `serverless_jobs` verified live 2026-10-26 ~16:30Z: test job 4 runs / 0 failed (= `job_run_timeline`), 0.206 DBU and $0.07
-  (= `system.billing.usage` 0.20616 DBU × list price $0.35). Billing then covered only one 10-minute window (13:10–13:20Z), so the
-  DBU total for all 4 runs is not yet confirmed.
+  cannot run classic clusters.
+- Idle-warehouse USD verified live ~16:40Z: billed SKU PREMIUM_SERVERLESS_SQL_COMPUTE_US_WEST_OREGON at $0.70/DBU → 5.0 idle DBU = $3.50
+  (billing: 3.88 DBU for 13:00–14:00Z, consistent with 4 DBU/h for 2X-Small).
+- `serverless_jobs` verified live 2026-10-26 ~16:40Z: test job 4 runs / 0 failed (= `job_run_timeline`), 0.215 DBU and $0.08
+  (= `system.billing.usage` 0.21454 DBU × $0.35). Billing then covered 13:00–14:00Z only (runs at 13:15 and 13:45Z), so the
+  DBUs of the 14:15/14:45Z runs are not yet confirmed.
 - Partial USD totals verified live: `cost_summary` $0.44 known + `usd_complete: false` + `unpriced_skus: [GENIE_FREE_USAGE]`.
 
 Not affiliated with Databricks. "Databricks" is a trademark of Databricks, Inc. MIT licensed, © 2026 Data and Beyond ApS.
