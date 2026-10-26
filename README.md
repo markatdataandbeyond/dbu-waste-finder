@@ -3,6 +3,12 @@
 A free, read-only Databricks notebook that finds where your DBUs go and what you can cut, using only
 Databricks **system tables**. One notebook, no install, no data leaves your workspace.
 
+This repo contains two things:
+- **`notebook/`** – the free notebook (below).
+- **`mcp/`** – an MCP server so Claude/Cursor can answer "why did our bill jump?" from your system tables and propose fixes as a diff to your Asset Bundle (read-only, never applied). See [`mcp/README.md`](mcp/README.md).
+
+Landing page: https://markatdataandbeyond.github.io/dbu-waste-finder/
+
 ## What it checks
 | Check | Source tables |
 |---|---|
