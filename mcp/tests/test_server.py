@@ -333,8 +333,11 @@ def test_string_booleans_from_statement_api():
 
 
 
-@pytest.mark.parametrize("obs,proj,low", [(0.0, None, True), (0.3, 30.0, True), (7.0, 1.29, False), (None, None, True)])
-def test_projection_from_observed_coverage(obs, proj, low):
+@pytest.mark.parametrize("obs,proj,low,withheld", [
+    (0.23, None, True, "need >=3 days, have 0.23"), (2.99, None, True, "need >=3 days, have 2.99"),
+    (3.0, 3.0, True, None), (6.99, 1.29, True, None), (7.0, 1.29, False, None),
+    (0.0, None, True, "need >=3 days, have 0"), (None, None, True, "need >=3 days, have unknown")])
+def test_projection_from_observed_coverage(obs, proj, low, withheld):
     def r7(q):
         if "AS observation_days" in q:
             return [{"observation_days": obs, "first_record": None}]
@@ -344,7 +347,18 @@ def test_projection_from_observed_coverage(obs, proj, low):
     r = call(build(r7), "find_waste", days=30)
     assert r["measured_saving_usd"] == 0.3 and r["measured_waste_dbu"] == 0.43
     assert r["observation_days"] == obs and r["projected_30d_usd"] == proj and r["low_confidence"] is low
-    assert any("low_confidence" in n or "fewer than 7" in n for n in r.get("notes", [])) is low
+    assert r.get("projection_withheld") == withheld
+    if withheld:
+        assert r["projected_30d_dbu"] is None
+    assert any("low_confidence" in n for n in r.get("notes", [])) is low
+
+
+def test_no_access_note_says_unknown():
+    def deny(q):
+        raise RuntimeError("[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table 'system.billing.usage'.")
+    r = call(build(deny), "find_waste")
+    note = [n for n in r["notes"] if "low_confidence" in n][0]
+    assert "unknown" in note and "0 days" not in note and r["projection_withheld"] == "need >=3 days, have unknown"
 
 
 def test_projection_with_missing_price():

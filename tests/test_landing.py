@@ -69,3 +69,9 @@ def test_no_savings_promises_on_page_or_readmes():
         hits = SAVINGS_PROMISE.findall(txt)
         assert not hits, f"{name} promises savings: {hits}"
     assert "observation_days" in README and "low_confidence" in README  # projection method documented
+
+
+def test_validation_status_not_stale():
+    vs = README.split("## Validation status", 1)[1]
+    assert "USD unknown" not in vs
+    assert "partial" in vs.lower() and "GENIE_FREE_USAGE" in vs

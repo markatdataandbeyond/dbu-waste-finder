@@ -73,19 +73,25 @@ def _known_sum(vals) -> float:
 
 
 MIN_CONFIDENT_DAYS = 7
+MIN_PROJECTION_DAYS = 3     # below this no 30-day projection is shown (projection_withheld)
 
 
 def _project(measured_usd, measured_dbu, observation_days) -> dict:
     """Same rule as the notebook's project(): measured / observation_days * 30; low_confidence below 7 days."""
     obs = None if observation_days is None else float(observation_days)
-    ok = obs is not None and obs > 0
+    have = "unknown" if obs is None else f"{obs:g}"
+    shown = obs is not None and obs >= MIN_PROJECTION_DAYS
     out = {"measured_saving_usd": measured_usd, "measured_waste_dbu": measured_dbu, "observation_days": obs,
-           "projected_30d_usd": round(measured_usd / obs * 30, 2) if ok and measured_usd is not None else None,
-           "projected_30d_dbu": round(measured_dbu / obs * 30, 2) if ok and measured_dbu is not None else None,
-           "low_confidence": not ok or obs < MIN_CONFIDENT_DAYS}
+           "projected_30d_usd": round(measured_usd / obs * 30, 2) if shown and measured_usd is not None else None,
+           "projected_30d_dbu": round(measured_dbu / obs * 30, 2) if shown and measured_dbu is not None else None,
+           "low_confidence": obs is None or obs < MIN_CONFIDENT_DAYS}
+    if not shown:
+        out["projection_withheld"] = f"need >={MIN_PROJECTION_DAYS} days, have {have}"
     if out["low_confidence"]:
-        out["note"] = (f"low_confidence: only {obs if obs is not None else 0} days of data (fewer than "
-                       f"{MIN_CONFIDENT_DAYS}); projected_30d_* is a rough extrapolation, not a forecast.")
+        days_txt = "observation_days unknown (data could not be read)" if obs is None else f"only {have} days of data"
+        out["note"] = (f"low_confidence: {days_txt} (fewer than {MIN_CONFIDENT_DAYS}); "
+                       + ("no 30-day projection below 3 days." if not shown
+                          else "the 30-day projection is a rough extrapolation, not a forecast."))
     return out
 
 

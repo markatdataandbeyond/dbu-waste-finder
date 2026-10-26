@@ -35,8 +35,9 @@ flagged incomplete (`usd_complete = false`), and the unpriced SKUs/items are lis
 - `observation_days`: how much data the window actually covers — from the earliest record inside the lookback window in
   `system.billing.usage` (`usage_start_time`) or `system.compute.warehouse_events` (`event_time`) until now, capped at the lookback.
   A workspace created yesterday has ~1 observed day even with a 30-day lookback.
-- `projected_30d_usd` / `projected_30d_dbu` = measured ÷ `observation_days` × 30. No projection when `observation_days` is 0 or unknown.
-- `low_confidence: true` (plus a note) when `observation_days` < 7. Exactly 7 days is not flagged.
+- `projected_30d_usd` / `projected_30d_dbu` = measured ÷ `observation_days` × 30, only when `observation_days` ≥ 3. Below 3 days
+  (or unknown) they are null and `projection_withheld` says why, e.g. `"need >=3 days, have 0.23"`.
+- `low_confidence: true` (plus a note) when `observation_days` < 7 (3–7 days: projection shown but flagged). Exactly 7 is not flagged.
 - This is an extrapolation of past waste at list price, not a promise of what you will get back.
 
 ## Privacy
@@ -69,8 +70,9 @@ the MCP server tests (mocked query results) and landing-page checks. No workspac
 
 ## Validation status
 - Run live against a Databricks trial workspace (AWS, serverless-only) on 2026-10-26: all queries execute; `idle_warehouse`
-  found the test warehouse (77 min up, 2 busy min); `warehouse_long_autostop` found it after deletion; cost tools returned DBUs
-  with USD unknown for an unpriced SKU.
+  found the test warehouse (77 min up, 2 busy min); `warehouse_long_autostop` found it after deletion; cost tools return DBUs
+  and a partial USD total for priced SKUs ($6.89 at ~16:40Z) with `usd_complete: false` and the one unpriced SKU listed
+  (`GENIE_FREE_USAGE`, 0.326 DBU).
 - Not yet validated live: the classic-cluster checks (jobs on all-purpose, auto-termination, idle clusters) — the trial workspace
   cannot run classic clusters.
 - Idle-warehouse USD verified live ~16:40Z: billed SKU PREMIUM_SERVERLESS_SQL_COMPUTE_US_WEST_OREGON at $0.70/DBU → 5.0 idle DBU = $3.50

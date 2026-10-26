@@ -191,12 +191,19 @@ def test_invalid_lookback_one_clear_error(bad, tmp_path, capsys):
     assert calls == [] and "[skip]" not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("obs,proj,low", [(0, None, True), (0.25, 840.0, True), (6.99, 30.04, True),
-                                          (7, 30.0, False), (30, 7.0, False), (None, None, True)])
-def test_projection_rule(obs, proj, low):
+@pytest.mark.parametrize("obs,proj,low,withheld", [
+    (0.23, None, True, "need >=3 days, have 0.23"), (2.99, None, True, "need >=3 days, have 2.99"),
+    (3.0, 70.0, True, None), (6.99, 30.04, True, None), (7, 30.0, False, None), (30, 7.0, False, None),
+    (0, None, True, "need >=3 days, have 0"), (None, None, True, "need >=3 days, have unknown")])
+def test_projection_rule(obs, proj, low, withheld):
     nb = runpy.run_path(NB)
     rows = {"idle_or_oversized": [{"cluster_id": "c", "est_saving_usd": 7.0}],
             "observation": [] if obs is None else [{"observation_days": obs}]}
     sm = nb["summarize"](rows)
     assert sm["measured_saving_usd"] == 7.0 and sm["projected_30d_usd"] == proj and sm["low_confidence"] is low
+    assert sm.get("projection_withheld") == withheld
+    if withheld:
+        assert sm["projected_30d_dbu"] is None
     assert ("note" in sm) is low
+    if obs is None:
+        assert "unknown" in sm["note"] and "0 days" not in sm["note"]
