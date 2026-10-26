@@ -7,7 +7,7 @@ small{color:#666}</style></head><body>
 <h1>Find wasted DBUs from your Databricks system tables.</h1>
 <p>DBU Waste Finder is a free, open-source notebook (and an MCP server) that reads your Databricks system tables
 and lists which jobs, clusters and SQL warehouses cost the most and which look wasteful, with the DBUs involved and,
-where <code>system.billing.list_prices</code> has a price, an estimate at list price. Read-only: no data leaves your workspace.</p>
+where <code>system.billing.list_prices</code> has a price, an estimate at list price. Read-only. The notebook keeps everything in your workspace; the MCP server sends results to your AI client (see Privacy).</p>
 <p><a class="cta" href="https://github.com/markatdataandbeyond/dbu-waste-finder">Get the free notebook</a></p>
 <h2>What it checks</h2><div class="grid">
 <div class="card"><b>Top cost drivers</b><br>DBUs and list-price cost by product, job, warehouse and cluster.</div>
@@ -22,7 +22,8 @@ trial workspace. Costs are list price, not your discount. Some SKUs have no list
 <h2>Pro</h2>
 <p>Pro is planned (around $149/month per workspace). Not built yet – <a href="mailto:mark@dataandbeyond.dk?subject=DBU%20Waste%20Finder%20Pro">email me</a> if you'd pay for it.</p>
 <h2>Privacy</h2>
-<p>Runs inside your workspace with read-only SELECT on system tables (billing and compute metadata, not your business data).
-No credentials or data are sent to us. If you email us, we only keep your name and email.</p>
+<p><b>The notebook:</b> runs inside your workspace with read-only SELECT on system tables (billing and compute metadata, not your business data). Nothing is sent anywhere.</p>
+<p><b>The MCP server</b> runs on your machine, not in your workspace. It queries your system tables with a token you provide and passes the results to your AI client (e.g. Claude or Cursor), and through it to that AI provider. Results can include job, cluster and warehouse names and ids, DBUs, list-price amounts and owners' email addresses. Use a read-only service principal and only connect it to an AI client you are allowed to share that metadata with.</p>
+<p>Nothing is sent to us. If you email us, we only keep your name and email.</p>
 <p><small>Data and Beyond ApS · CVR 42397075 · Denmark. Not affiliated with Databricks, Inc.</small></p>
 </body></html>

@@ -49,3 +49,12 @@ def test_pro_section_exact_one_price_no_competitors():
     assert re.findall(r"\$\d[\d,]*", t) == ["$149"]
     for c in ("LakeSentry", "SELECT from", "DataFlint", "$299", "comparison"):
         assert c not in t
+
+
+def test_privacy_honest_about_mcp():
+    t = re.sub(r"\s+", " ", _text(PAGE)).lower()
+    assert "no data leaves your workspace" not in t.replace("the notebook: no data leaves your workspace", "")
+    assert "mcp server runs on your machine" in t and "ai client" in t
+    assert "email addresses" in t
+    r = README.lower()
+    assert "mcp server runs on your machine" in r and "ai client" in r

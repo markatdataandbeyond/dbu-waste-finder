@@ -13,6 +13,7 @@ MOCK = {
                        {"job_id": "j8", "dbus": 1.0, "list_cost_usd": 0.7, "runs": 2, "failed_runs": 0,
                         "est_waste_dbus": 0.0, "est_saving_usd": 0.0}],
     "auto_stop_minutes DESC": [{"warehouse_id": "wh1", "auto_stop_minutes": 90}],
+    "AS unpriced_dbus": [{"sku_name": "GENIE_FREE_USAGE", "unpriced_dbus": 0.326}],
     "billing_origin_product, ROUND": [{"billing_origin_product": "JOBS", "list_cost_usd": 700.0},
                                        {"billing_origin_product": "ALL_PURPOSE", "list_cost_usd": 300.0}],
     "SELECT usage_date, ROUND": [{"usage_date": "2026-10-01", "list_cost_usd": 33.3}],
@@ -66,7 +67,8 @@ def test_cost_summary(srv):
 
 
 def test_top_cost_drivers(srv):
-    assert call(srv, "top_cost_drivers")[0]["resource_id"] == "123"
+    r = call(srv, "top_cost_drivers")
+    assert r["rows"][0]["resource_id"] == "123" and r["unpriced_skus"][0]["sku_name"] == "GENIE_FREE_USAGE"
 
 
 def test_find_waste_saving_scaled_to_month(srv):
@@ -156,29 +158,71 @@ def test_propose_fix_errors():
         fixes.propose(BUNDLE, "bogus", "nightly_etl")
 
 
-# --- empty list_prices: USD must be unknown (None), never $0; DBUs still reported ---
-def test_unknown_price_is_none_not_zero():
+# --- missing prices: known partial sum + usd_complete flag + list of what is unpriced (never null total) ---
+def test_mixed_prices_partial_sums_everywhere():
     def r3(q):
+        if "AS unpriced_dbus" in q:
+            return [{"sku_name": "GENIE_FREE_USAGE", "unpriced_dbus": 0.326}]
         if "billing_origin_product, ROUND" in q:
-            return [{"billing_origin_product": "SQL", "dbus": 4.2, "list_cost_usd": None}]
+            return [{"billing_origin_product": "SQL", "dbus": 0.533, "list_cost_usd": 0.37, "usd_complete": True},
+                    {"billing_origin_product": "GENIE", "dbus": 0.326, "list_cost_usd": None, "usd_complete": False}]
         if "SELECT usage_date, ROUND" in q:
-            return [{"usage_date": "2026-10-26", "dbus": 4.2, "list_cost_usd": None}]
+            return [{"usage_date": "2026-10-26", "dbus": 0.859, "list_cost_usd": 0.37, "usd_complete": False}]
+        if "AS resource_type" in q:
+            return [{"resource_type": "warehouse", "resource_id": "wh", "dbus": 0.533, "list_cost_usd": 0.37, "usd_complete": True}]
+        if "est_idle_dbus" in q:
+            return [{"warehouse_id": "a", "est_idle_dbus": 3.93, "est_idle_cost_usd": 2.75},
+                    {"warehouse_id": "b", "est_idle_dbus": 5.0, "est_idle_cost_usd": None}]
         if "est_waste_dbus" in q:
             return [{"job_id": "j7", "dbus": 2.0, "list_cost_usd": None, "runs": 4, "failed_runs": 1,
                      "est_waste_dbus": 0.5, "est_saving_usd": None}]
         if "jobs_using_cluster" in q or "avg_cpu_pct" in q:
             return []
         if "delta_usd" in q:
-            return [{"resource_id": "wh1", "day_dbus": 4.2, "delta_dbus": 4.2, "delta_usd": None}]
+            return [{"resource_id": "wh", "delta_dbus": 0.533, "delta_usd": 0.37, "usd_complete": True},
+                    {"resource_id": "GENIE", "delta_dbus": 0.326, "delta_usd": None, "usd_complete": False}]
         return runner(q)
     srv = build(r3)
     cs = call(srv, "cost_summary")
-    assert cs["total_list_cost_usd"] is None and cs["total_dbus"] == 4.2 and "cost_unknown" in cs
+    assert cs["total_list_cost_usd"] == 0.37 and cs["usd_complete"] is False
+    assert cs["unpriced_skus"] == [{"sku_name": "GENIE_FREE_USAGE", "unpriced_dbus": 0.326}]
     fw = call(srv, "find_waste", days=30)
-    assert fw["est_monthly_saving_usd"] is None and "cost_unknown" in fw
-    assert fw["est_monthly_waste_dbus"] == 4.5
+    assert fw["est_monthly_saving_usd"] == 2.75 and fw["usd_complete"] is False
+    assert {"check": "idle_warehouse", "id": "b"} in fw["unpriced_items"]
+    assert {"check": "serverless_jobs", "id": "j7"} in fw["unpriced_items"]
+    assert fw["unpriced_skus"][0]["sku_name"] == "GENIE_FREE_USAGE"
+    assert fw["est_monthly_waste_dbus"] == 9.43
     sp = call(srv, "explain_cost_spike", date="2026-10-26")
-    assert sp["net_delta_top15_usd"] is None and sp["net_delta_top15_dbus"] == 4.2
+    assert sp["net_delta_top15_usd"] == 0.37 and sp["usd_complete"] is False and sp["net_delta_top15_dbus"] == 0.859
+    tc = call(srv, "top_cost_drivers")
+    assert tc["usd_complete"] is False  # rows complete, but an unpriced SKU exists in the window
+
+
+def test_all_priced_is_complete(srv):
+    def r5(q):
+        return [] if "AS unpriced_dbus" in q else runner(q)
+    cs = call(build(r5), "cost_summary")
+    assert cs["usd_complete"] is True and cs["unpriced_skus"] == []
+
+
+@pytest.mark.parametrize("tool,extra", [("cost_summary", {}), ("top_cost_drivers", {}), ("find_waste", {})])
+@pytest.mark.parametrize("bad", [0, -1, 100000])
+def test_invalid_days_one_clear_error(tool, extra, bad):
+    from mcp.server.mcpserver.exceptions import ToolError
+    qs = []
+    with pytest.raises(ToolError, match="days must be an integer 1..365"):
+        asyncio.run(build(lambda q: qs.append(q) or []).call_tool(tool, {"days": bad, **extra}))
+    assert qs == []
+
+
+def test_non_integer_days_rejected():
+    res = None
+    try:
+        res = asyncio.run(build(lambda q: []).call_tool("find_waste", {"days": 1.5}))
+    except Exception as e:
+        assert "days" in str(e)
+        return
+    assert res.is_error and "days" in res.content[0].text
 
 
 def test_serverless_queries_rendered(srv):
@@ -216,9 +260,9 @@ def test_find_waste_no_access_gives_concrete_errors_not_zero():
             raise RuntimeError("[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table 'system.compute.clusters'.")
         raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] The table or view `system`.`billing`.`usage` cannot be found.")
     r = call(build(deny), "find_waste")
-    assert r["est_monthly_saving_usd"] is None and r["est_monthly_waste_dbus"] is None
+    assert r["est_monthly_saving_usd"] is None and r["est_monthly_waste_dbus"] is None  # checks failed: unknown
     assert set(r["errors"]) == {"jobs_on_all_purpose", "missing_autotermination", "idle_or_oversized",
-                                "warehouse_long_autostop", "idle_warehouse", "serverless_jobs"}
+                                "warehouse_long_autostop", "idle_warehouse", "serverless_jobs", "unpriced_skus"}
     e = r["errors"]["warehouse_long_autostop"]
     assert e["reason"] == "permission_denied" and e["tables"] == ["system.compute.warehouses"]
     assert "GRANT SELECT ON TABLE system.compute.warehouses" in e["fix"]
@@ -238,7 +282,7 @@ def test_find_waste_row_limit():
     assert len(r["idle_or_oversized"]) == 25 and r["truncated"] == {"idle_or_oversized": {"shown": 25, "total": 500}}
     assert r["est_monthly_saving_usd"] == 500.0   # totals over ALL 500 rows, not the 25 shown
     assert r["totals_partial"] is False
-    assert all(q.rstrip().endswith("LIMIT 100001") for q in qs)  # safety cap only
+    assert all(q.rstrip().endswith("LIMIT 100001") for q in qs if "unpriced_dbus" not in q)  # safety cap only
 
 
 def test_find_waste_totals_marked_partial_when_safety_cap_hit(monkeypatch):
@@ -262,3 +306,21 @@ def test_other_tools_give_concrete_access_error(tool, args):
     e = r["errors"][tool]
     assert e["reason"] == "permission_denied" and e["tables"] == ["system.billing.usage"]
     assert "GRANT SELECT ON TABLE system.billing.usage" in e["fix"]
+
+
+def test_string_booleans_from_statement_api():
+    """Statement API returns booleans as 'true'/'false' strings (seen live 2026-10-26)."""
+    def r6(q):
+        if "AS unpriced_dbus" in q:
+            return [{"sku_name": "GENIE_FREE_USAGE", "unpriced_dbus": "0.326"}]
+        if "delta_usd" in q:
+            return [{"resource_id": "wh", "delta_dbus": "0.533", "delta_usd": "0.37", "usd_complete": "true"},
+                    {"resource_id": "GENIE", "delta_dbus": "0.326", "delta_usd": None, "usd_complete": "false"}]
+        if "billing_origin_product, ROUND" in q:
+            return [{"billing_origin_product": "GENIE", "dbus": "0.326", "list_cost_usd": None, "usd_complete": "false"}]
+        return []
+    sp = call(build(r6), "explain_cost_spike", date="2026-10-26")
+    assert sp["usd_complete"] is False and sp["unpriced_resources"] == ["GENIE"]
+    assert sp["top_movers"][1]["usd_complete"] is False
+    cs = call(build(r6), "cost_summary")
+    assert cs["by_product"][0]["usd_complete"] is False

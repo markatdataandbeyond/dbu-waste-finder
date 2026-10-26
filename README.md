@@ -1,7 +1,7 @@
 # DBU Waste Finder
 
 A free, read-only Databricks notebook that finds where your DBUs go and what you can cut, using only
-Databricks **system tables**. One notebook, no install, no data leaves your workspace.
+Databricks **system tables**. One notebook, no install; the notebook sends nothing out of your workspace.
 
 This repo contains two things:
 - **`notebook/`** – the free notebook (below).
@@ -21,12 +21,21 @@ Landing page: https://markatdataandbeyond.github.io/dbu-waste-finder/
 | Serverless jobs: DBUs and cost per job, runs, failed runs; waste = failed-run share (`serverless_jobs`) | `system.billing.usage` (SKU contains `SERVERLESS`), `system.lakeflow.job_run_timeline` |
 | Estimated monthly saving | USD from all saving checks incl. idle warehouses, scaled to 30 days (NULL if any flagged item has no price), plus wasted DBUs |
 
-If a SKU has no row in `system.billing.list_prices` (e.g. `GENIE_FREE_USAGE`), its cost is shown as NULL = **unknown**, never $0; DBUs are always shown.
+If a SKU has no row in `system.billing.list_prices` (e.g. `GENIE_FREE_USAGE`), USD totals are the sum of the **priced** part,
+flagged incomplete (`usd_complete = false`), and the unpriced SKUs/items are listed (`unpriced_skus`, `unpriced()` in the notebook,
+`unpriced_items` in `find_waste`). DBUs are always shown.
 
 ## Use
 1. Import `notebook/dbu_waste_finder.py` into your workspace (File → Import).
 2. Attach to any compute (serverless works) as a user with `SELECT` on `system.billing`, `system.compute`, `system.lakeflow`.
 3. Adjust thresholds in the first cell, Run all. Checks whose schema isn't enabled are skipped.
+
+## Privacy
+- **Notebook:** runs inside your workspace, read-only; nothing leaves the workspace.
+- **MCP server:** the MCP server runs on your machine, not in the workspace. It reads system tables with your token and returns the
+  results to your AI client (Claude, Cursor, …) and thereby to that AI provider: job/cluster/warehouse names and ids, DBUs,
+  list-price amounts and owners' email addresses (`missing_autotermination` returns `owned_by`). Use a read-only service principal
+  and only connect it to an AI client you may share that metadata with. Nothing is sent to Data and Beyond.
 
 ## Caveats
 - Costs use `pricing.effective_list.default` (list price), not your contracted discount.
@@ -54,6 +63,10 @@ the MCP server tests (mocked query results) and landing-page checks. No workspac
   found the test warehouse (77 min up, 2 busy min); `warehouse_long_autostop` found it after deletion; cost tools returned DBUs
   with USD unknown for an unpriced SKU.
 - Not yet validated live: the classic-cluster checks (jobs on all-purpose, auto-termination, idle clusters) — the trial workspace
-  cannot run classic clusters — and `serverless_jobs` USD/DBU figures (billing rows had not landed yet).
+  cannot run classic clusters — and idle-warehouse USD (the deleted test warehouse had no billing rows yet).
+- `serverless_jobs` verified live 2026-10-26 ~16:30Z: test job 4 runs / 0 failed (= `job_run_timeline`), 0.206 DBU and $0.07
+  (= `system.billing.usage` 0.20616 DBU × list price $0.35). Billing then covered only one 10-minute window (13:10–13:20Z), so the
+  DBU total for all 4 runs is not yet confirmed.
+- Partial USD totals verified live: `cost_summary` $0.44 known + `usd_complete: false` + `unpriced_skus: [GENIE_FREE_USAGE]`.
 
 Not affiliated with Databricks. "Databricks" is a trademark of Databricks, Inc. MIT licensed, © 2026 Data and Beyond ApS.

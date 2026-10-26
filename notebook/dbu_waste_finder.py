@@ -25,7 +25,10 @@ WH_MIN_UPTIME_MIN = 30      # ignore warehouses up less than this many minutes i
 
 def month_factor():
     # LOOKBACK_DAYS < 1 is invalid (render() raises); never divide by zero here
-    return 30.0 / LOOKBACK_DAYS if LOOKBACK_DAYS >= 1 else 0.0
+    try:
+        return 30.0 / validate_lookback(LOOKBACK_DAYS)
+    except ValueError:
+        return 0.0
 
 # Spark SQL. {d} = lookback days. Column names verified against docs.databricks.com
 # (admin/system-tables/billing, /pricing, /compute, /jobs), fetched 2026-10-26.
@@ -49,7 +52,8 @@ WITH priced AS (
 QUERIES = {
 "cost_by_product": PRICED_USAGE + """
 SELECT billing_origin_product, ROUND(SUM(dbus), 3) AS dbus,
-       CASE WHEN COUNT(list_cost) = COUNT(*) THEN ROUND(SUM(list_cost), 2) END AS list_cost_usd
+       ROUND(SUM(list_cost), 2) AS list_cost_usd,          -- sum of the priced part; NULL only if nothing is priced
+       COUNT(list_cost) = COUNT(*) AS usd_complete
 FROM priced GROUP BY billing_origin_product HAVING SUM(dbus) <> 0
 ORDER BY list_cost_usd DESC NULLS LAST, dbus DESC""",
 
@@ -60,7 +64,7 @@ SELECT CASE WHEN job_id IS NOT NULL THEN 'job'
             ELSE 'other' END AS resource_type,
        COALESCE(job_id, warehouse_id, cluster_id, billing_origin_product) AS resource_id,
        ROUND(SUM(dbus), 3) AS dbus,
-       CASE WHEN COUNT(list_cost) = COUNT(*) THEN ROUND(SUM(list_cost), 2) END AS list_cost_usd
+       ROUND(SUM(list_cost), 2) AS list_cost_usd, COUNT(list_cost) = COUNT(*) AS usd_complete
 FROM priced GROUP BY 1, 2 HAVING SUM(dbus) <> 0
 ORDER BY list_cost_usd DESC NULLS LAST, dbus DESC LIMIT 20""",
 
@@ -113,6 +117,11 @@ SELECT u.cluster_id, ROUND(u.avg_cpu, 1) AS avg_cpu_pct, ROUND(u.avg_mem, 1) AS 
 FROM util u JOIN cost c ON u.cluster_id = c.cluster_id
 WHERE u.avg_cpu < {cpu} AND u.avg_mem < {mem}
 ORDER BY est_saving_usd DESC""",
+
+# SKUs used in the window that have no list price (their cost is excluded from USD totals).
+"unpriced_skus": PRICED_USAGE + """
+SELECT sku_name, ROUND(SUM(dbus), 3) AS unpriced_dbus
+FROM priced WHERE list_cost IS NULL GROUP BY sku_name HAVING SUM(dbus) <> 0 ORDER BY unpriced_dbus DESC""",
 
 # warehouses table is SCD2 too. auto_stop_minutes = 0 means never auto-stops.
 # Warehouses deleted inside the window are kept (they burned DBUs before deletion); delete_time shows it.
@@ -202,9 +211,14 @@ FROM sj s LEFT JOIN runs r ON s.job_id = r.job_id
 ORDER BY dbus DESC""",
 }
 
+def validate_lookback(days):
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 365:
+        raise ValueError(f"LOOKBACK_DAYS must be an integer 1..365, got {days!r}")
+    return days
+
+
 def render(name):
-    if not 1 <= int(LOOKBACK_DAYS) <= 365:
-        raise ValueError(f"LOOKBACK_DAYS must be 1..365, got {LOOKBACK_DAYS}")
+    validate_lookback(LOOKBACK_DAYS)
     return QUERIES[name].format(d=int(LOOKBACK_DAYS), maxterm=int(MAX_AUTOTERM_MIN),
                                 idle_share=IDLE_SAVING_SHARE, cpu=IDLE_CPU_PCT, mem=IDLE_MEM_PCT,
                                 idle_pct=float(WH_IDLE_PCT), min_up=int(WH_MIN_UPTIME_MIN))
@@ -212,6 +226,7 @@ def render(name):
 # COMMAND ----------
 
 def run_all(sql_fn):
+    validate_lookback(LOOKBACK_DAYS)  # one clear error up front, not one [skip] per check
     out = {}
     for name in QUERIES:
         try:
@@ -225,17 +240,27 @@ SAVING_COLS = (("jobs_on_all_purpose", "est_saving_if_job_compute_usd"), ("idle_
 WASTE_DBU_COLS = (("idle_warehouse", "est_idle_dbus"), ("serverless_jobs", "est_waste_dbus"))
 
 
+ID_COLS = ("cluster_id", "warehouse_id", "job_id")
+
+
 def summarize(rows_by_check):
-    """rows_by_check: name -> list of dict rows. Returns monthly saving estimate (USD, list price),
-    or None if a flagged row has unknown price (NULL) -- never silently $0."""
-    s, unknown = 0.0, False
+    """Monthly saving estimate (USD, list price) over the PRICED items only. Items without a price are
+    listed by unpriced(); a missing price never turns the known amount into NULL or $0-for-everything."""
+    s = 0.0
+    for name, col in SAVING_COLS:
+        s += sum(float(r[col]) for r in rows_by_check.get(name, []) if r.get(col) is not None)
+    return round(s * month_factor(), 2)
+
+
+def unpriced(rows_by_check):
+    """What is missing from the USD totals: SKUs without list price, and flagged items without a USD value."""
+    items = []
     for name, col in SAVING_COLS:
         for r in rows_by_check.get(name, []):
-            if r.get(col) is not None:
-                s += float(r[col])
-            elif name != "serverless_jobs" or r.get("failed_runs"):
-                unknown = True  # flagged waste whose price is missing
-    return None if unknown else round(s * month_factor(), 2)
+            if r.get(col) is None and (name != "serverless_jobs" or r.get("failed_runs")):
+                items.append((name, next((r[c] for c in ID_COLS if r.get(c)), None)))
+    skus = [r["sku_name"] for r in rows_by_check.get("unpriced_skus", [])]
+    return {"complete": not items and not skus, "skus": skus, "items": items}
 
 
 def summarize_dbus(rows_by_check):
@@ -251,8 +276,9 @@ if "spark" in globals():
         print(f"== {name}")
         display(df)  # noqa: F821
     rows = {k: [r.asDict() for r in v.collect()] for k, v in results.items()}
-    usd = summarize(rows)
-    usd_txt = f"~${usd:,.0f}/month" if usd is not None else "unknown $ (list_prices has no price for some SKUs)"
+    usd, miss = summarize(rows), unpriced(rows)
+    usd_txt = f"~${usd:,.0f}/month" + ("" if miss["complete"] else
+              f" (INCOMPLETE: no list price for SKUs {miss['skus']} / items {miss['items']})")
     print(f"Estimated saving at list price: {usd_txt} "
           f"(overlap between checks possible; idle saving share is an assumption: {IDLE_SAVING_SHARE:.0%}).")
     print(f"Waste in DBUs (idle warehouses + failed serverless runs): ~{summarize_dbus(rows):,.1f} DBU/month")

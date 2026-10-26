@@ -16,7 +16,8 @@ def make_db(empty_prices=False):
      ('w1','PREMIUM_JOBS_COMPUTE','AWS','DBU',200.0, current_date-3, current_timestamp-INTERVAL 3 DAY,'JOBS', {'cluster_id':'c_job','job_id':'j2','warehouse_id':NULL}),
      ('w1','PREMIUM_JOBS_COMPUTE','AWS','DBU',999.0, current_date-90, current_timestamp-INTERVAL 90 DAY,'JOBS', {'cluster_id':'c_old','job_id':'j9','warehouse_id':NULL}),
      ('w1','PREMIUM_JOBS_SERVERLESS_COMPUTE_US_EAST','AWS','DBU',4.0, current_date-1, current_timestamp-INTERVAL 1 DAY,'JOBS', {'cluster_id':NULL,'job_id':'j7','warehouse_id':NULL}),
-     ('w1','PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST','AWS','DBU',4.0, current_date-1, current_timestamp-INTERVAL 1 DAY,'SQL', {'cluster_id':NULL,'job_id':NULL,'warehouse_id':'wh1'})
+     ('w1','PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST','AWS','DBU',4.0, current_date-1, current_timestamp-INTERVAL 1 DAY,'SQL', {'cluster_id':NULL,'job_id':NULL,'warehouse_id':'wh1'}),
+     ('w1','GENIE_FREE_USAGE','AWS','DBU',0.3, current_date-1, current_timestamp-INTERVAL 1 DAY,'GENIE', {'cluster_id':NULL,'job_id':NULL,'warehouse_id':NULL})
     ) t(workspace_id,sku_name,cloud,usage_unit,usage_quantity,usage_date,usage_end_time,billing_origin_product,usage_metadata)""")
     con.execute("""
     CREATE TABLE billing_list_prices AS SELECT * FROM (VALUES
@@ -105,6 +106,11 @@ def test_notebook_queries_on_mock_system_tables():
     assert set(res) == set(nb["QUERIES"]), "a query failed"
     cbp = res["cost_by_product"][0]  # 150*0.55 ; 90-day row excluded
     assert cbp["billing_origin_product"] == "ALL_PURPOSE" and cbp["list_cost_usd"] == 82.5 and _f(cbp["dbus"]) == 150
+    assert cbp["usd_complete"] is True
+    genie = [r for r in res["cost_by_product"] if r["billing_origin_product"] == "GENIE"][0]
+    assert genie["list_cost_usd"] is None and genie["usd_complete"] is False and _f(genie["dbus"]) == 0.3
+    assert [(r["sku_name"], _f(r["unpriced_dbus"])) for r in res["unpriced_skus"]] == [("GENIE_FREE_USAGE", 0.3)]
+    assert nb["unpriced"](res)["skus"] == ["GENIE_FREE_USAGE"]
     assert {r["cluster_id"] for r in res["missing_autotermination"]} == {"c_ap"}   # latest row has 0; JOB cluster ignored
     ap = res["jobs_on_all_purpose"]; assert len(ap) == 1 and ap[0]["cluster_id"] == "c_ap"
     assert abs(ap[0]["est_saving_if_job_compute_usd"] - round(55*(1-0.15/0.55), 2)) < 0.01  # 40.0
@@ -136,7 +142,10 @@ def test_empty_list_prices_gives_unknown_usd_not_zero():
     assert {r["resource_id"] for r in res["top_cost_drivers"]} >= {"wh1", "j7"}
     assert all(r["list_cost_usd"] is None and _f(r["dbus"]) > 0 for r in res["top_cost_drivers"])
     assert res["serverless_jobs"][0]["est_saving_usd"] is None and _f(res["serverless_jobs"][0]["est_waste_dbus"]) == 1.0
-    assert nb["summarize"](res) is None            # unknown, not $0
+    assert nb["summarize"](res) == 0.0             # known partial sum (nothing priced) ...
+    u = nb["unpriced"](res)                        # ... flagged incomplete, with what is missing
+    assert u["complete"] is False and "GENIE_FREE_USAGE" in u["skus"]
+    assert ("idle_warehouse", "wh1") in u["items"] and ("serverless_jobs", "j7") in u["items"]
     assert res["idle_warehouse"][0]["est_idle_cost_usd"] is None
     assert nb["summarize_dbus"](res) == 4.93
 
@@ -150,3 +159,26 @@ def test_lookback_zero_no_division_by_zero(tmp_path):
         nb["render"]("cost_by_product")
     assert nb["summarize"]({}) == 0.0               # no ZeroDivisionError
     assert nb["summarize_dbus"]({}) == 0.0
+
+
+def test_mixed_prices_partial_sum_not_null():
+    nb = runpy.run_path(NB)
+    res = nb["run_all"](make_db())
+    res["idle_warehouse"].append({"warehouse_id": "whX", "est_idle_dbus": 3.0, "est_idle_cost_usd": None})
+    assert nb["summarize"](res) == 57.0            # known amount kept
+    u = nb["unpriced"](res)
+    assert u["complete"] is False and u["items"] == [("idle_warehouse", "whX")]
+
+
+import pytest
+
+
+@pytest.mark.parametrize("bad", [0, -5, 1.5, 100000, "30", True])
+def test_invalid_lookback_one_clear_error(bad, tmp_path, capsys):
+    src = pathlib.Path(NB).read_text().replace("LOOKBACK_DAYS = 30", f"LOOKBACK_DAYS = {bad!r}", 1)
+    f = tmp_path / "nbbad.py"; f.write_text(src)
+    nb = runpy.run_path(str(f))
+    calls = []
+    with pytest.raises(ValueError, match="LOOKBACK_DAYS must be an integer 1..365"):
+        nb["run_all"](lambda q: calls.append(q) or [])
+    assert calls == [] and "[skip]" not in capsys.readouterr().out

@@ -4,6 +4,7 @@ import re
 from typing import Any, Callable
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from . import fixes, queries
 
@@ -61,6 +62,23 @@ def _access_error(q: str, e: Exception) -> dict:
     return {"reason": reason, "tables": tables, "fix": fix, "error": msg[:300]}
 
 
+def _norm(row: dict) -> dict:
+    """Statement API returns booleans as 'true'/'false' strings; make *_complete real booleans."""
+    return {k: (v.lower() == "true" if isinstance(v, str) and k.endswith("_complete") else v) for k, v in row.items()}
+
+
+def _known_sum(vals) -> float:
+    """Sum of the USD values that are known (priced). Missing prices are reported separately."""
+    return round(sum(float(v) for v in vals if v is not None), 2)
+
+
+def _days(days) -> int:
+    try:
+        return queries.validate_days(days)
+    except ValueError as e:
+        raise ToolError(str(e)) from None  # ToolError text reaches the client (not the generic crash text)
+
+
 def _f(x) -> float:
     return float(x or 0)
 
@@ -74,34 +92,50 @@ def build(runner: Runner | None = None) -> MCPServer:
     def run(q: str):
         if state["run"] is None:
             state["run"] = databricks_runner()
-        return state["run"](q)
+        return [_norm(r) for r in state["run"](q)]
+
+    def unpriced_skus(days: int):
+        """SKUs used in the window without a list price -> (rows, error)."""
+        q = queries.render(queries.UNPRICED, days)
+        try:
+            return run(q), None
+        except Exception as e:
+            return [], _access_error(q, e)
 
     @mcp.tool()
     def cost_summary(days: int = 30) -> dict:
-        """Total list-price cost, cost per product and per day for the last `days` days."""
+        """Total list-price cost, cost per product and per day for the last `days` days. USD totals cover the
+        priced usage; `usd_complete` is false and `unpriced_skus` lists SKUs without a list price."""
+        days = _days(days)
         try:
             q = queries.render(queries.COST_BY_PRODUCT, days); by_product = run(q)
             q = queries.render(queries.DAILY_COST, days); daily = run(q)
-        except ValueError:
-            raise
         except Exception as e:
             return {"days": days, "total_list_cost_usd": None, "errors": {"cost_summary": _access_error(q, e)}}
-        total = _sum_or_none(r.get("list_cost_usd") for r in by_product)
-        out = {"days": days, "total_list_cost_usd": total,
-               "total_dbus": round(sum(_f(r.get("dbus")) for r in by_product), 3),
+        skus, err = unpriced_skus(days)
+        out = {"days": days, "total_list_cost_usd": _known_sum(r.get("list_cost_usd") for r in by_product),
+               "usd_complete": not skus and err is None and all(r.get("usd_complete", True) for r in by_product),
+               "unpriced_skus": skus, "total_dbus": round(sum(_f(r.get("dbus")) for r in by_product), 3),
                "by_product": by_product, "daily": daily, "note": "List price, not your negotiated discount."}
-        if total is None:
-            out["cost_unknown"] = "system.billing.list_prices has no price for some SKUs; USD unknown, see DBUs."
+        if err:
+            out["errors"] = {"unpriced_skus": err}
         return out
 
     @mcp.tool()
-    def top_cost_drivers(days: int = 30) -> list[dict] | dict:
-        """Top 20 jobs/warehouses/clusters by list-price cost (dict with `errors` if the tables can't be read)."""
+    def top_cost_drivers(days: int = 30) -> dict:
+        """Top 20 jobs/warehouses/clusters by list-price cost: {rows, usd_complete, unpriced_skus}."""
+        days = _days(days)
         q = queries.render(queries.WASTE["top_cost_drivers"], days)
         try:
-            return run(q)
+            rows = run(q)
         except Exception as e:
             return {"errors": {"top_cost_drivers": _access_error(q, e)}}
+        skus, err = unpriced_skus(days)
+        out = {"rows": rows, "usd_complete": not skus and err is None and all(r.get("usd_complete", True) for r in rows),
+               "unpriced_skus": skus}
+        if err:
+            out["errors"] = {"unpriced_skus": err}
+        return out
 
     @mcp.tool()
     def find_waste(days: int = 30, max_autotermination_minutes: int = 60,
@@ -111,9 +145,10 @@ def build(runner: Runner | None = None) -> MCPServer:
         (uptime vs query time), serverless job cost incl. failed runs. Max `max_rows` rows per check
         (sorted by impact). Saving in USD is None when unknown (missing price or missing access);
         failed checks are listed under `errors` with the table and the fix."""
+        days = _days(days)
         max_rows = int(max_rows)
         if not 1 <= max_rows <= 1000:
-            raise ValueError("max_rows must be 1..1000")
+            raise ToolError(f"max_rows must be an integer 1..1000, got {max_rows!r}")
         out, errors, truncated, full, capped = {}, {}, {}, {}, {}
         for k in ("jobs_on_all_purpose", "missing_autotermination", "idle_or_oversized",
                   "warehouse_long_autostop", "idle_warehouse", "serverless_jobs"):
@@ -135,24 +170,37 @@ def build(runner: Runner | None = None) -> MCPServer:
         usd += [r.get("est_saving_usd") for r in full.get("idle_or_oversized", [])]
         usd += [r.get("est_saving_usd") for r in full.get("serverless_jobs", []) if r.get("failed_runs")]
         usd += [r.get("est_idle_cost_usd") for r in full.get("idle_warehouse", [])]
-        saving = _sum_or_none(usd)
-        saving_checks = {"jobs_on_all_purpose", "idle_or_oversized", "serverless_jobs"}
+        saving = _known_sum(usd)
+        saving_checks = {"jobs_on_all_purpose", "idle_or_oversized", "serverless_jobs", "idle_warehouse"}
         dbu_checks = {"idle_warehouse", "serverless_jobs"}
-        if saving_checks & set(errors) and not (saving_checks - set(errors)):
-            saving = None  # every saving check failed: unknown, not $0
-        out["est_monthly_saving_usd"] = None if saving is None else round(saving * 30.0 / days, 2)
+        all_failed = saving_checks <= set(errors)
+        out["est_monthly_saving_usd"] = None if all_failed else round(saving * 30.0 / days, 2)
         if dbu_checks <= set(errors):
             out["est_monthly_waste_dbus"] = None
         else:
             dbus = sum(_f(r.get("est_idle_dbus")) for r in full.get("idle_warehouse", []))
             dbus += sum(_f(r.get("est_waste_dbus")) for r in full.get("serverless_jobs", []))
             out["est_monthly_waste_dbus"] = round(dbus * 30.0 / days, 2)
-        if saving is None:
-            out["cost_unknown"] = ("USD unknown (not $0): " + ("some checks failed, see errors"
-                                   if errors else "some flagged items have no list price, see DBUs"))
+        items = []
+        for k, col in (("jobs_on_all_purpose", "est_saving_if_job_compute_usd"), ("idle_or_oversized", "est_saving_usd"),
+                       ("idle_warehouse", "est_idle_cost_usd"), ("serverless_jobs", "est_saving_usd")):
+            for r in full.get(k, []):
+                if r.get(col) is None and (k != "serverless_jobs" or r.get("failed_runs")):
+                    items.append({"check": k, "id": next((r[c] for c in ("cluster_id", "warehouse_id", "job_id")
+                                                          if r.get(c)), None)})
+        skus, err = unpriced_skus(days)
+        if err:
+            errors["unpriced_skus"] = err
+        out["unpriced_items"], out["unpriced_skus"] = items, skus
+        out["usd_complete"] = not items and not skus and not errors
+        if all_failed:
+            out["cost_unknown"] = "USD unknown (not $0): every saving check failed, see errors"
+        elif not out["usd_complete"]:
+            out["usd_note"] = ("est_monthly_saving_usd is the sum of priced items only; see unpriced_items/"
+                               "unpriced_skus" + (" and errors" if errors else ""))
         if errors:
             out.setdefault("notes", []).append(
-                f"{len(errors)} of 6 checks could not run; totals cover only the checks that ran.")
+                f"{len([k for k in errors if k != 'unpriced_skus'])} of 6 checks could not run; totals cover only the checks that ran.")
         if out.get("idle_warehouse"):
             out.setdefault("notes", []).append("Idle-warehouse waste = idle DBUs (size-based rate) x list price of the "
                                                "warehouse's billed SKU; USD null until its usage is in system.billing. "
@@ -169,13 +217,17 @@ def build(runner: Runner | None = None) -> MCPServer:
     @mcp.tool()
     def explain_cost_spike(date: str) -> dict:
         """Which resources drove cost on `date` (YYYY-MM-DD) vs the prior 7-day daily average."""
-        q = queries.render_spike(date)
+        try:
+            q = queries.render_spike(date)
+        except ValueError as e:
+            raise ToolError(f"date must be YYYY-MM-DD: {e}") from None
         try:
             rows = run(q)
         except Exception as e:
             return {"date": date, "net_delta_top15_usd": None, "errors": {"explain_cost_spike": _access_error(q, e)}}
-        delta = _sum_or_none(r.get("delta_usd") for r in rows)
-        return {"date": date, "top_movers": rows, "net_delta_top15_usd": delta,
+        unpriced = sorted({str(r.get("resource_id")) for r in rows if not r.get("usd_complete", True)})
+        return {"date": date, "top_movers": rows, "net_delta_top15_usd": _known_sum(r.get("delta_usd") for r in rows),
+                "usd_complete": not unpriced, "unpriced_resources": unpriced,
                 "net_delta_top15_dbus": round(sum(_f(r.get("delta_dbus")) for r in rows), 3)}
 
     @mcp.tool()
