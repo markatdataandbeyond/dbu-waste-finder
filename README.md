@@ -17,9 +17,9 @@ Landing page: https://markatdataandbeyond.github.io/dbu-waste-finder/
 | All-purpose clusters with auto-termination off (0/NULL) or above 60 min | `system.compute.clusters` (latest SCD row) |
 | Idle or oversized clusters (avg CPU < 10 % and memory < 30 %) | `system.compute.node_timeline` |
 | SQL warehouses with auto-stop off (0) or above 60 min, incl. warehouses deleted inside the window (`warehouse_long_autostop`) | `system.compute.warehouses` (latest SCD row) |
-| Idle SQL warehouses: uptime (`cluster_count` × time between events) vs minutes with a query running; flagged at ≥ 80 % idle and ≥ 30 min up, waste in DBUs from size (`idle_warehouse`) | `system.compute.warehouse_events`, `system.query.history`, `system.compute.warehouses` |
+| Idle SQL warehouses: uptime (`cluster_count` × time between events) vs minutes with a query running; flagged at ≥ 80 % idle and ≥ 30 min up, waste in DBUs from size × list price of the warehouse's billed SKU (USD NULL until its usage is in billing) (`idle_warehouse`) | `system.compute.warehouse_events`, `system.query.history`, `system.compute.warehouses` |
 | Serverless jobs: DBUs and cost per job, runs, failed runs; waste = failed-run share (`serverless_jobs`) | `system.billing.usage` (SKU contains `SERVERLESS`), `system.lakeflow.job_run_timeline` |
-| Estimated monthly saving | USD from the saving checks scaled to 30 days, plus wasted DBUs (idle warehouses, failed serverless runs) |
+| Estimated monthly saving | USD from all saving checks incl. idle warehouses, scaled to 30 days (NULL if any flagged item has no price), plus wasted DBUs |
 
 If a SKU has no row in `system.billing.list_prices` (e.g. `GENIE_FREE_USAGE`), its cost is shown as NULL = **unknown**, never $0; DBUs are always shown.
 

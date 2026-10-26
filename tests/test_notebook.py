@@ -117,10 +117,13 @@ def test_notebook_queries_on_mock_system_tables():
     assert lng["wh3"]["delete_time"] is not None and lng["wh1"]["delete_time"] is None
     idle = res["idle_warehouse"]; assert [r["warehouse_id"] for r in idle] == ["wh1"]  # wh2 busy + <30 min up
     assert _f(idle[0]["uptime_min"]) == 60.0 and idle[0]["busy_min"] == 1 and _f(idle[0]["est_idle_dbus"]) == 3.93
+    # priced with the warehouse's own billed SKU (PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST, $0.70/DBU)
+    assert idle[0]["sku_name"] == "PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST" and _f(idle[0]["usd_per_dbu"]) == 0.7
+    assert _f(idle[0]["est_idle_cost_usd"]) == 2.75
     sj = res["serverless_jobs"]; assert len(sj) == 1 and sj[0]["job_id"] == "j7"
     assert (sj[0]["runs"], sj[0]["failed_runs"]) == (4, 1) and _f(sj[0]["dbus"]) == 4.0
     assert _f(sj[0]["est_waste_dbus"]) == 1.0 and _f(sj[0]["est_saving_usd"]) == 0.5  # 1/4 of 4 DBU x $0.5
-    assert nb["summarize"](res) == 54.25          # 40 + 13.75 + 0.5
+    assert nb["summarize"](res) == 57.0           # 40 + 13.75 + 0.5 + 2.75 idle warehouse
     assert nb["summarize_dbus"](res) == 4.93      # 3.93 idle wh + 1.0 failed run
     print("ALL TESTS PASSED")
 
@@ -134,6 +137,7 @@ def test_empty_list_prices_gives_unknown_usd_not_zero():
     assert all(r["list_cost_usd"] is None and _f(r["dbus"]) > 0 for r in res["top_cost_drivers"])
     assert res["serverless_jobs"][0]["est_saving_usd"] is None and _f(res["serverless_jobs"][0]["est_waste_dbus"]) == 1.0
     assert nb["summarize"](res) is None            # unknown, not $0
+    assert res["idle_warehouse"][0]["est_idle_cost_usd"] is None
     assert nb["summarize_dbus"](res) == 4.93
 
 

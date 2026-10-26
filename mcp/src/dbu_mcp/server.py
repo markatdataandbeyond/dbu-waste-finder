@@ -7,6 +7,7 @@ from mcp.server.mcpserver import MCPServer
 
 from . import fixes, queries
 
+FETCH_CAP = 100_000  # safety cap on rows fetched per check (totals are marked partial if hit)
 Runner = Callable[[str], list[dict[str, Any]]]
 
 
@@ -78,8 +79,13 @@ def build(runner: Runner | None = None) -> MCPServer:
     @mcp.tool()
     def cost_summary(days: int = 30) -> dict:
         """Total list-price cost, cost per product and per day for the last `days` days."""
-        by_product = run(queries.render(queries.COST_BY_PRODUCT, days))
-        daily = run(queries.render(queries.DAILY_COST, days))
+        try:
+            q = queries.render(queries.COST_BY_PRODUCT, days); by_product = run(q)
+            q = queries.render(queries.DAILY_COST, days); daily = run(q)
+        except ValueError:
+            raise
+        except Exception as e:
+            return {"days": days, "total_list_cost_usd": None, "errors": {"cost_summary": _access_error(q, e)}}
         total = _sum_or_none(r.get("list_cost_usd") for r in by_product)
         out = {"days": days, "total_list_cost_usd": total,
                "total_dbus": round(sum(_f(r.get("dbus")) for r in by_product), 3),
@@ -89,9 +95,13 @@ def build(runner: Runner | None = None) -> MCPServer:
         return out
 
     @mcp.tool()
-    def top_cost_drivers(days: int = 30) -> list[dict]:
-        """Top 20 jobs/warehouses/clusters by list-price cost."""
-        return run(queries.render(queries.WASTE["top_cost_drivers"], days))
+    def top_cost_drivers(days: int = 30) -> list[dict] | dict:
+        """Top 20 jobs/warehouses/clusters by list-price cost (dict with `errors` if the tables can't be read)."""
+        q = queries.render(queries.WASTE["top_cost_drivers"], days)
+        try:
+            return run(q)
+        except Exception as e:
+            return {"errors": {"top_cost_drivers": _access_error(q, e)}}
 
     @mcp.tool()
     def find_waste(days: int = 30, max_autotermination_minutes: int = 60,
@@ -104,22 +114,27 @@ def build(runner: Runner | None = None) -> MCPServer:
         max_rows = int(max_rows)
         if not 1 <= max_rows <= 1000:
             raise ValueError("max_rows must be 1..1000")
-        out, errors, truncated = {}, {}, {}
+        out, errors, truncated, full, capped = {}, {}, {}, {}, {}
         for k in ("jobs_on_all_purpose", "missing_autotermination", "idle_or_oversized",
                   "warehouse_long_autostop", "idle_warehouse", "serverless_jobs"):
             q = queries.render(queries.WASTE[k], days, maxterm=max_autotermination_minutes,
-                               idle_pct=warehouse_idle_pct) + f"\nLIMIT {max_rows + 1}"
+                               idle_pct=warehouse_idle_pct) + f"\nLIMIT {FETCH_CAP + 1}"
             try:
                 rows = run(q)
             except Exception as e:  # e.g. system schema not enabled / no SELECT
                 errors[k] = _access_error(q, e)
                 continue
+            if len(rows) > FETCH_CAP:
+                rows, capped[k] = rows[:FETCH_CAP], True
+            full[k] = rows
             if len(rows) > max_rows:
-                rows, truncated[k] = rows[:max_rows], True
-            out[k] = rows
-        usd = [r.get("est_saving_if_job_compute_usd") for r in out.get("jobs_on_all_purpose", [])]
-        usd += [r.get("est_saving_usd") for r in out.get("idle_or_oversized", [])]
-        usd += [r.get("est_saving_usd") for r in out.get("serverless_jobs", []) if r.get("failed_runs")]
+                truncated[k] = {"shown": max_rows, "total": f">{FETCH_CAP}" if k in capped else len(rows)}
+            out[k] = rows[:max_rows]
+        # totals over ALL fetched rows (not only the max_rows shown)
+        usd = [r.get("est_saving_if_job_compute_usd") for r in full.get("jobs_on_all_purpose", [])]
+        usd += [r.get("est_saving_usd") for r in full.get("idle_or_oversized", [])]
+        usd += [r.get("est_saving_usd") for r in full.get("serverless_jobs", []) if r.get("failed_runs")]
+        usd += [r.get("est_idle_cost_usd") for r in full.get("idle_warehouse", [])]
         saving = _sum_or_none(usd)
         saving_checks = {"jobs_on_all_purpose", "idle_or_oversized", "serverless_jobs"}
         dbu_checks = {"idle_warehouse", "serverless_jobs"}
@@ -129,8 +144,8 @@ def build(runner: Runner | None = None) -> MCPServer:
         if dbu_checks <= set(errors):
             out["est_monthly_waste_dbus"] = None
         else:
-            dbus = sum(_f(r.get("est_idle_dbus")) for r in out.get("idle_warehouse", []))
-            dbus += sum(_f(r.get("est_waste_dbus")) for r in out.get("serverless_jobs", []))
+            dbus = sum(_f(r.get("est_idle_dbus")) for r in full.get("idle_warehouse", []))
+            dbus += sum(_f(r.get("est_waste_dbus")) for r in full.get("serverless_jobs", []))
             out["est_monthly_waste_dbus"] = round(dbus * 30.0 / days, 2)
         if saving is None:
             out["cost_unknown"] = ("USD unknown (not $0): " + ("some checks failed, see errors"
@@ -139,8 +154,12 @@ def build(runner: Runner | None = None) -> MCPServer:
             out.setdefault("notes", []).append(
                 f"{len(errors)} of 6 checks could not run; totals cover only the checks that ran.")
         if out.get("idle_warehouse"):
-            out.setdefault("notes", []).append("Idle-warehouse waste is in DBUs only (size-based rate), not in "
-                                               "est_monthly_saving_usd; fix with propose_fix issue='warehouse_autostop'.")
+            out.setdefault("notes", []).append("Idle-warehouse waste = idle DBUs (size-based rate) x list price of the "
+                                               "warehouse's billed SKU; USD null until its usage is in system.billing. "
+                                               "Fix with propose_fix issue='warehouse_autostop'.")
+        out["totals_partial"] = bool(capped)
+        if capped:
+            out.setdefault("notes", []).append(f"Totals are partial: {sorted(capped)} hit the {FETCH_CAP}-row fetch cap.")
         if truncated:
             out["truncated"] = truncated
         if errors:
@@ -150,7 +169,11 @@ def build(runner: Runner | None = None) -> MCPServer:
     @mcp.tool()
     def explain_cost_spike(date: str) -> dict:
         """Which resources drove cost on `date` (YYYY-MM-DD) vs the prior 7-day daily average."""
-        rows = run(queries.render_spike(date))
+        q = queries.render_spike(date)
+        try:
+            rows = run(q)
+        except Exception as e:
+            return {"date": date, "net_delta_top15_usd": None, "errors": {"explain_cost_spike": _access_error(q, e)}}
         delta = _sum_or_none(r.get("delta_usd") for r in rows)
         return {"date": date, "top_movers": rows, "net_delta_top15_usd": delta,
                 "net_delta_top15_dbus": round(sum(_f(r.get("delta_dbus")) for r in rows), 3)}

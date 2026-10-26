@@ -37,3 +37,15 @@ def test_only_tested_checks_listed():
 def test_readme_describes_serverless_checks():
     for k in ("warehouse_long_autostop", "idle_warehouse", "serverless_jobs", "warehouse_autostop"):
         assert k in README + (ROOT / "mcp/README.md").read_text()
+
+
+PRO = "Pro is planned (around $149/month per workspace). Not built yet \u2013 email me if you'd pay for it."
+
+
+def test_pro_section_exact_one_price_no_competitors():
+    t = re.sub(r"\s+", " ", _text(PAGE))
+    assert PRO in t
+    assert 'href="mailto:mark@dataandbeyond.dk' in PAGE
+    assert re.findall(r"\$\d[\d,]*", t) == ["$149"]
+    for c in ("LakeSentry", "SELECT from", "DataFlint", "$299", "comparison"):
+        assert c not in t

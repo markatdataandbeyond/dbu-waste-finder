@@ -155,18 +155,31 @@ WITH ev AS (
   SELECT warehouse_id, warehouse_name, warehouse_size, auto_stop_minutes FROM (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY warehouse_id ORDER BY change_time DESC) AS rn
     FROM system.compute.warehouses) x WHERE rn = 1
-)
+), wsku AS (  -- the SKU this warehouse is actually billed under, and its current list price
+  SELECT s.warehouse_id, s.sku_name, CAST(p.pricing.effective_list.default AS DOUBLE) AS usd_per_dbu FROM (
+    SELECT usage_metadata.warehouse_id AS warehouse_id, sku_name, cloud, usage_unit,
+           ROW_NUMBER() OVER (PARTITION BY usage_metadata.warehouse_id ORDER BY usage_end_time DESC) AS rn
+    FROM system.billing.usage
+    WHERE usage_metadata.warehouse_id IS NOT NULL AND usage_date >= date_add(current_date(), -{d})
+  ) s LEFT JOIN system.billing.list_prices p
+    ON s.sku_name = p.sku_name AND s.cloud = p.cloud AND s.usage_unit = p.usage_unit AND p.price_end_time IS NULL
+  WHERE s.rn = 1
+), res AS (
 SELECT u.warehouse_id, w.warehouse_name, w.warehouse_size, w.auto_stop_minutes,
        ROUND(u.uptime_min, 1) AS uptime_min, COALESCE(b.busy_min, 0) AS busy_min, COALESCE(b.queries, 0) AS queries,
        ROUND(100.0 * GREATEST(u.uptime_min - COALESCE(b.busy_min, 0), 0) / u.uptime_min, 1) AS idle_pct,
        ROUND(GREATEST(u.uptime_min - COALESCE(b.busy_min, 0), 0) / 60.0
              * CASE w.warehouse_size WHEN '2X_SMALL' THEN 4 WHEN 'X_SMALL' THEN 6 WHEN 'SMALL' THEN 12
                    WHEN 'MEDIUM' THEN 24 WHEN 'LARGE' THEN 40 WHEN 'X_LARGE' THEN 80 WHEN '2X_LARGE' THEN 144
-                   WHEN '3X_LARGE' THEN 272 WHEN '4X_LARGE' THEN 528 END, 2) AS est_idle_dbus
+                   WHEN '3X_LARGE' THEN 272 WHEN '4X_LARGE' THEN 528 END, 2) AS est_idle_dbus,
+       k.sku_name, k.usd_per_dbu
 FROM up u LEFT JOIN busy b ON u.warehouse_id = b.warehouse_id LEFT JOIN wh w ON u.warehouse_id = w.warehouse_id
+LEFT JOIN wsku k ON u.warehouse_id = k.warehouse_id
 WHERE u.uptime_min >= {min_up}
   AND 100.0 * GREATEST(u.uptime_min - COALESCE(b.busy_min, 0), 0) / u.uptime_min >= {idle_pct}
-ORDER BY est_idle_dbus DESC NULLS LAST""",
+)
+SELECT *, ROUND(est_idle_dbus * usd_per_dbu, 2) AS est_idle_cost_usd  -- NULL = unknown (no billed SKU/price yet)
+FROM res ORDER BY est_idle_dbus DESC NULLS LAST""",
 
 # Serverless jobs: DBUs/cost per job and share spent on failed runs (est. waste = failed-run share of cost).
 "serverless_jobs": PRICED_USAGE + """
@@ -208,7 +221,7 @@ def run_all(sql_fn):
     return out
 
 SAVING_COLS = (("jobs_on_all_purpose", "est_saving_if_job_compute_usd"), ("idle_or_oversized", "est_saving_usd"),
-               ("serverless_jobs", "est_saving_usd"))
+               ("serverless_jobs", "est_saving_usd"), ("idle_warehouse", "est_idle_cost_usd"))
 WASTE_DBU_COLS = (("idle_warehouse", "est_idle_dbus"), ("serverless_jobs", "est_waste_dbus"))
 
 

@@ -7,7 +7,7 @@ from dbu_mcp.server import build
 
 MOCK = {
     "est_idle_dbus": [{"warehouse_id": "wh1", "warehouse_size": "2X_SMALL", "uptime_min": 61.0, "busy_min": 1,
-                       "idle_pct": 98.4, "est_idle_dbus": 4.0}],
+                       "idle_pct": 98.4, "est_idle_dbus": 4.0, "usd_per_dbu": 0.7, "est_idle_cost_usd": 2.8}],
     "est_waste_dbus": [{"job_id": "j7", "dbus": 2.0, "list_cost_usd": 1.4, "runs": 4, "failed_runs": 1,
                         "est_waste_dbus": 0.5, "est_saving_usd": 0.35},
                        {"job_id": "j8", "dbus": 1.0, "list_cost_usd": 0.7, "runs": 2, "failed_runs": 0,
@@ -71,7 +71,7 @@ def test_top_cost_drivers(srv):
 
 def test_find_waste_saving_scaled_to_month(srv):
     r = call(srv, "find_waste", days=15)
-    assert r["est_monthly_saving_usd"] == 400.7  # (165+35+0.35 failed serverless run)*30/15
+    assert r["est_monthly_saving_usd"] == 406.3  # (165+35+0.35 failed run+2.8 idle warehouse)*30/15
     assert r["est_monthly_waste_dbus"] == 9.0      # (4 idle wh + 0.5 failed run)*30/15
     assert r["warehouse_long_autostop"][0]["auto_stop_minutes"] == 90
     assert r["idle_warehouse"][0]["warehouse_id"] == "wh1"
@@ -85,7 +85,7 @@ def test_find_waste_degrades_when_schema_missing():
             raise RuntimeError("TABLE_OR_VIEW_NOT_FOUND system.compute.node_timeline")
         return runner(q)
     r = call(build(r2), "find_waste")
-    assert "idle_or_oversized" in r["errors"] and r["est_monthly_saving_usd"] == 165.35
+    assert "idle_or_oversized" in r["errors"] and r["est_monthly_saving_usd"] == 168.15
 
 
 def test_explain_cost_spike(srv):
@@ -235,5 +235,30 @@ def test_find_waste_row_limit():
         qs.append(q)
         return many if "avg_cpu_pct" in q else []
     r = call(build(r4), "find_waste", max_rows=25)
-    assert len(r["idle_or_oversized"]) == 25 and r["truncated"] == {"idle_or_oversized": True}
-    assert all(q.rstrip().endswith("LIMIT 26") for q in qs)
+    assert len(r["idle_or_oversized"]) == 25 and r["truncated"] == {"idle_or_oversized": {"shown": 25, "total": 500}}
+    assert r["est_monthly_saving_usd"] == 500.0   # totals over ALL 500 rows, not the 25 shown
+    assert r["totals_partial"] is False
+    assert all(q.rstrip().endswith("LIMIT 100001") for q in qs)  # safety cap only
+
+
+def test_find_waste_totals_marked_partial_when_safety_cap_hit(monkeypatch):
+    from dbu_mcp import server
+    monkeypatch.setattr(server, "FETCH_CAP", 10)
+    many = [{"cluster_id": f"c{i}", "est_saving_usd": 1.0} for i in range(11)]
+    r = call(build(lambda q: many if "avg_cpu_pct" in q else []), "find_waste", max_rows=5)
+    assert r["totals_partial"] is True and r["truncated"]["idle_or_oversized"]["total"] == ">10"
+    assert any("partial" in n for n in r["notes"])
+
+
+DENY = "[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table 'system.billing.usage'."
+
+
+@pytest.mark.parametrize("tool,args", [("cost_summary", {}), ("top_cost_drivers", {}),
+                                       ("explain_cost_spike", {"date": "2026-10-26"})])
+def test_other_tools_give_concrete_access_error(tool, args):
+    def deny(q):
+        raise RuntimeError(DENY)
+    r = call(build(deny), tool, **args)
+    e = r["errors"][tool]
+    assert e["reason"] == "permission_denied" and e["tables"] == ["system.billing.usage"]
+    assert "GRANT SELECT ON TABLE system.billing.usage" in e["fix"]
