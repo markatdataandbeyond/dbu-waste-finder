@@ -26,6 +26,7 @@ def make_db(empty_prices=False, extra=()):
      ('PREMIUM_JOBS_SERVERLESS_COMPUTE_US_EAST','AWS','DBU', TIMESTAMP '2020-01-01', NULL::TIMESTAMP, {'default':'0.5','effective_list':{'default':'0.5'}}),
      ('PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST','AWS','DBU', TIMESTAMP '2020-01-01', NULL::TIMESTAMP, {'default':'0.7','effective_list':{'default':'0.7'}})
     ) t(sku_name,cloud,usage_unit,price_start_time,price_end_time,pricing)""")
+    con.execute("ALTER TABLE billing_list_prices ADD COLUMN currency_code VARCHAR DEFAULT 'USD'")
     if empty_prices:
         con.execute("DELETE FROM billing_list_prices")
     con.execute("ALTER TABLE billing_usage ADD COLUMN usage_start_time TIMESTAMP")

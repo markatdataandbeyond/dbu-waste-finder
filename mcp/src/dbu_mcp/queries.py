@@ -35,7 +35,7 @@ SELECT usage_date, ROUND(SUM(dbus), 3) AS dbus,
        ROUND(SUM(list_cost), 2) AS list_cost_usd, COUNT(list_cost) = COUNT(*) AS usd_complete
 FROM priced GROUP BY usage_date ORDER BY usage_date"""
 
-# Cost per resource on one day vs the average of the 7 days before it.
+# Cost per resource on one UTC billing day (usage_date) vs the average of the 7 days before it.
 SPIKE = """
 WITH priced AS (
   SELECT u.usage_date, u.billing_origin_product,
@@ -48,6 +48,7 @@ WITH priced AS (
     ON u.sku_name = p.sku_name AND u.cloud = p.cloud AND u.usage_unit = p.usage_unit
    AND u.usage_end_time >= p.price_start_time
    AND (p.price_end_time IS NULL OR u.usage_end_time < p.price_end_time)
+   AND p.currency_code = 'USD'
   WHERE u.usage_date BETWEEN date_add(DATE'{day}', -7) AND DATE'{day}'
 ), agg AS (
   SELECT billing_origin_product, resource_id,

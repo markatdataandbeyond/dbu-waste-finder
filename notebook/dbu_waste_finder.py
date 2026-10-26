@@ -41,6 +41,7 @@ WITH priced AS (
     ON u.sku_name = p.sku_name AND u.cloud = p.cloud AND u.usage_unit = p.usage_unit
    AND u.usage_end_time >= p.price_start_time
    AND (p.price_end_time IS NULL OR u.usage_end_time < p.price_end_time)
+   AND p.currency_code = 'USD'
   WHERE u.usage_date >= date_add(current_date(), -{d})
 )
 """
@@ -86,7 +87,7 @@ ORDER BY auto_termination_minutes DESC NULLS FIRST""",
                   THEN CAST(pricing.effective_list.default AS DOUBLE) END)
        / AVG(CASE WHEN sku_name LIKE '%ALL_PURPOSE_COMPUTE%' AND sku_name NOT LIKE '%SERVERLESS%' AND sku_name NOT LIKE '%PHOTON%'
                   THEN CAST(pricing.effective_list.default AS DOUBLE) END) AS jobs_to_ap
-  FROM system.billing.list_prices WHERE price_end_time IS NULL
+  FROM system.billing.list_prices WHERE price_end_time IS NULL AND currency_code = 'USD'
 ), runs AS (
   SELECT DISTINCT t.workspace_id, t.job_id, c.cluster_id
   FROM system.lakeflow.job_task_run_timeline t
@@ -123,7 +124,8 @@ WITH t AS (
   UNION ALL
   SELECT event_time AS ts FROM system.compute.warehouse_events WHERE event_time >= date_add(current_date(), -{d})
 )
-SELECT ROUND(LEAST(TIMESTAMPDIFF(SECOND, MIN(ts), current_timestamp()) / 86400.0, {d}), 2) AS observation_days,
+SELECT CASE WHEN MIN(ts) IS NOT NULL  -- LEAST() skips NULLs: no records must stay NULL, not {d}
+            THEN ROUND(LEAST(TIMESTAMPDIFF(SECOND, MIN(ts), current_timestamp()) / 86400.0, {d}), 2) END AS observation_days,
        MIN(ts) AS first_record
 FROM t""",
 
@@ -143,7 +145,7 @@ SELECT workspace_id, warehouse_id, warehouse_name, warehouse_type, warehouse_siz
 FROM latest
 WHERE rn = 1 AND (delete_time IS NULL OR delete_time >= date_add(current_date(), -{d}))
   AND (auto_stop_minutes IS NULL OR auto_stop_minutes = 0 OR auto_stop_minutes > {maxterm})
-ORDER BY auto_stop_minutes DESC NULLS FIRST""",
+ORDER BY auto_stop_minutes DESC NULLS FIRST, warehouse_id""",
 
 # Uptime from warehouse_events (cluster_count x time until next event) vs. time with a query running
 # (query.history, overlaps merged per minute). DBU/h per cluster by size = Databricks SQL published rates
@@ -181,6 +183,7 @@ WITH ev AS (
     WHERE usage_metadata.warehouse_id IS NOT NULL AND usage_date >= date_add(current_date(), -{d})
   ) s LEFT JOIN system.billing.list_prices p
     ON s.sku_name = p.sku_name AND s.cloud = p.cloud AND s.usage_unit = p.usage_unit AND p.price_end_time IS NULL
+   AND p.currency_code = 'USD'
   WHERE s.rn = 1
 ), res AS (
 SELECT u.warehouse_id, w.warehouse_name, w.warehouse_size, w.auto_stop_minutes,
@@ -234,6 +237,22 @@ def render(name):
 
 # COMMAND ----------
 
+import re as _re
+
+
+def access_hint(q, e):
+    """Readable reason + fix for a failed check (missing grant / schema not enabled)."""
+    msg, tables = str(e), sorted(set(_re.findall(r"\bsystem\.[a-z_]+\.[a-z_]+\b", q)))
+    up = msg.upper()
+    if any(k in up for k in ("PERMISSION", "NOT AUTHORIZED", "ACCESS DENIED", "INSUFFICIENT")):
+        fix = "; ".join(f"GRANT SELECT ON TABLE {t} TO <principal>" for t in tables)
+        return f"no access. Fix: {fix} (plus USE CATALOG system and USE SCHEMA). Error: {msg[:150]}"
+    if any(k in up for k in ("NOT_FOUND", "NOT FOUND", "CANNOT BE FOUND", "DOES NOT EXIST")):
+        schemas = ", ".join(sorted({t.rsplit(".", 1)[0] for t in tables}))
+        return f"system schema not enabled. Fix: an account admin enables {schemas}. Error: {msg[:150]}"
+    return msg[:200]
+
+
 def run_all(sql_fn):
     validate_lookback(LOOKBACK_DAYS)  # one clear error up front, not one [skip] per check
     out = {}
@@ -241,7 +260,7 @@ def run_all(sql_fn):
         try:
             out[name] = sql_fn(render(name))
         except Exception as e:  # e.g. a system schema not enabled
-            print(f"[skip] {name}: {str(e)[:200]}")
+            print(f"[skip] {name}: {access_hint(render(name), e)}")
     return out
 
 SAVING_COLS = (("jobs_on_all_purpose", "est_saving_if_job_compute_usd"), ("idle_or_oversized", "est_saving_usd"),
@@ -252,7 +271,7 @@ WASTE_DBU_COLS = (("idle_warehouse", "est_idle_dbus"), ("serverless_jobs", "est_
 ID_COLS = ("cluster_id", "warehouse_id", "job_id")
 
 
-def project(measured_usd, measured_dbu, observation_days):
+def project(measured_usd, measured_dbu, observation_days, no_data=False):
     """Measured waste in the observed period -> 30-day projection: measured / observation_days * 30.
     No projection without observed data; low_confidence below MIN_CONFIDENT_DAYS."""
     obs = None if observation_days is None else float(observation_days)
@@ -265,7 +284,8 @@ def project(measured_usd, measured_dbu, observation_days):
     if not shown:
         out["projection_withheld"] = f"need >={MIN_PROJECTION_DAYS} days, have {have}"
     if out["low_confidence"]:
-        days_txt = "observation_days unknown (data could not be read)" if obs is None else f"only {have} days of data"
+        days_txt = ("no usage records in the window yet (new workspace or billing lag)" if obs is None and no_data
+                    else "observation_days unknown (data could not be read)" if obs is None else f"only {have} days of data")
         out["note"] = (f"low_confidence: {days_txt} (fewer than {MIN_CONFIDENT_DAYS}); "
                        + ("no 30-day projection below 3 days." if not shown
                           else "the 30-day projection is a rough extrapolation, not a forecast."))
@@ -280,7 +300,8 @@ def summarize(rows_by_check):
         s += sum(float(r[col]) for r in rows_by_check.get(name, []) if r.get(col) is not None)
     dbu = sum(float(r.get(col) or 0) for name, col in WASTE_DBU_COLS for r in rows_by_check.get(name, []))
     obs_rows = rows_by_check.get("observation") or [{}]
-    return project(round(s, 2), round(dbu, 2), obs_rows[0].get("observation_days"))
+    no_data = bool(rows_by_check.get("observation")) and obs_rows[0].get("observation_days") is None
+    return project(round(s, 2), round(dbu, 2), obs_rows[0].get("observation_days"), no_data=no_data)
 
 
 def unpriced(rows_by_check):

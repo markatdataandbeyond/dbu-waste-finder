@@ -76,7 +76,7 @@ MIN_CONFIDENT_DAYS = 7
 MIN_PROJECTION_DAYS = 3     # below this no 30-day projection is shown (projection_withheld)
 
 
-def _project(measured_usd, measured_dbu, observation_days) -> dict:
+def _project(measured_usd, measured_dbu, observation_days, no_data=False) -> dict:
     """Same rule as the notebook's project(): measured / observation_days * 30; low_confidence below 7 days."""
     obs = None if observation_days is None else float(observation_days)
     have = "unknown" if obs is None else f"{obs:g}"
@@ -88,7 +88,8 @@ def _project(measured_usd, measured_dbu, observation_days) -> dict:
     if not shown:
         out["projection_withheld"] = f"need >={MIN_PROJECTION_DAYS} days, have {have}"
     if out["low_confidence"]:
-        days_txt = "observation_days unknown (data could not be read)" if obs is None else f"only {have} days of data"
+        days_txt = ("no usage records in the window yet (new workspace or billing lag)" if obs is None and no_data
+                    else "observation_days unknown (data could not be read)" if obs is None else f"only {have} days of data")
         out["note"] = (f"low_confidence: {days_txt} (fewer than {MIN_CONFIDENT_DAYS}); "
                        + ("no 30-day projection below 3 days." if not shown
                           else "the 30-day projection is a rough extrapolation, not a forecast."))
@@ -212,7 +213,7 @@ def build(runner: Runner | None = None) -> MCPServer:
         except Exception as e:
             obs_rows, errors["observation"] = [], _access_error(q, e)
         obs = obs_rows[0].get("observation_days") if obs_rows else None
-        proj = _project(measured_usd, measured_dbu, obs)
+        proj = _project(measured_usd, measured_dbu, obs, no_data=bool(obs_rows) and obs is None)
         note = proj.pop("note", None)
         out.update(proj)
         if note:
@@ -252,11 +253,12 @@ def build(runner: Runner | None = None) -> MCPServer:
 
     @mcp.tool()
     def explain_cost_spike(date: str) -> dict:
-        """Which resources drove cost on `date` (YYYY-MM-DD) vs the prior 7-day daily average."""
+        """Which resources drove cost on `date` (YYYY-MM-DD, a UTC billing day = system.billing.usage.usage_date)
+        vs the prior 7-day daily average."""
         try:
             q = queries.render_spike(date)
         except ValueError as e:
-            raise ToolError(f"date must be YYYY-MM-DD: {e}") from None
+            raise ToolError(f"date must be YYYY-MM-DD (a UTC billing day, no time or offset): {e}") from None
         try:
             rows = run(q)
         except Exception as e:
