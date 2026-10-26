@@ -25,25 +25,35 @@ Costs are at list price (`system.billing.list_prices`), not your discount.
   to an AI client you may share that metadata with. Nothing is sent to Data and Beyond.
 
 ## Requirements
-Unity Catalog with `system.billing`, `system.compute`, `system.lakeflow` enabled; a SQL warehouse;
+Unity Catalog with `system.billing`, `system.compute`, `system.lakeflow`, `system.query` enabled; a SQL warehouse;
 a token for a principal with only `SELECT` on those schemas (use a service principal).
+
+Read-only grants for a service principal (run as a metastore/account admin; use the SP's application ID):
+```sql
+GRANT USE CATALOG ON CATALOG system TO `<sp-application-id>`;
+GRANT USE SCHEMA, SELECT ON SCHEMA system.billing TO `<sp-application-id>`;
+GRANT USE SCHEMA, SELECT ON SCHEMA system.compute TO `<sp-application-id>`;
+GRANT USE SCHEMA, SELECT ON SCHEMA system.lakeflow TO `<sp-application-id>`;
+GRANT USE SCHEMA, SELECT ON SCHEMA system.query TO `<sp-application-id>`;
+```
+Then give the SP **CAN USE** on the SQL warehouse (warehouse → Permissions). Nothing else is needed.
 
 ## Install
 ```bash
 git clone https://github.com/markatdataandbeyond/dbu-waste-finder && cd dbu-waste-finder/mcp
 python3 -m venv .venv && .venv/bin/pip install -e .
 ```
-Env: `DATABRICKS_HOST` (e.g. `adb-123.azuredatabricks.net`), `DATABRICKS_HTTP_PATH` (warehouse → Connection details), `DATABRICKS_TOKEN`.
-
-**Two ways to connect** (both read-only):
-- `DATABRICKS_WAREHOUSE_ID` set → uses the SQL Statement Execution API over HTTPS (no `DATABRICKS_HTTP_PATH` needed). Env: `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_WAREHOUSE_ID` (warehouse → Overview, or the id at the end of the HTTP path).
-- Otherwise → `databricks-sql-connector` with `DATABRICKS_HTTP_PATH` as above.
+**Connect** (both read-only):
+1. **Recommended:** `DATABRICKS_HOST` (e.g. `adb-123.azuredatabricks.net`), `DATABRICKS_TOKEN`, `DATABRICKS_WAREHOUSE_ID`
+   (warehouse → Overview, or the id at the end of the HTTP path). Uses the SQL Statement Execution API over HTTPS.
+2. Fallback, only if `DATABRICKS_WAREHOUSE_ID` is not set: `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_HTTP_PATH`
+   (warehouse → Connection details), via `databricks-sql-connector`.
 
 ### Claude Desktop (`claude_desktop_config.json`)
 ```json
 {"mcpServers": {"dbu-waste-finder": {
   "command": "/abs/path/mcp/.venv/bin/dbu-waste-finder-mcp",
-  "env": {"DATABRICKS_HOST": "...", "DATABRICKS_HTTP_PATH": "/sql/1.0/warehouses/...", "DATABRICKS_TOKEN": "..."}}}}
+  "env": {"DATABRICKS_HOST": "...", "DATABRICKS_WAREHOUSE_ID": "...", "DATABRICKS_TOKEN": "..."}}}}
 ```
 ### Cursor (`.cursor/mcp.json` or `~/.cursor/mcp.json`)
 Same JSON block as above.

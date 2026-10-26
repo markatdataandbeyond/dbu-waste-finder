@@ -27,7 +27,7 @@ flagged incomplete (`usd_complete = false`), and the unpriced SKUs/items are lis
 
 ## Use
 1. Import `notebook/dbu_waste_finder.py` into your workspace (File → Import).
-2. Attach to any compute (serverless works) as a user with `SELECT` on `system.billing`, `system.compute`, `system.lakeflow`.
+2. Attach to any compute (serverless works) as a user with `USE CATALOG` on `system` and `USE SCHEMA` + `SELECT` on `system.billing`, `system.compute`, `system.lakeflow`, `system.query` (grant snippet in [`mcp/README.md`](mcp/README.md)).
 3. Adjust thresholds in the first cell, Run all. Checks whose schema isn't enabled are skipped.
 
 ## How the projection works
