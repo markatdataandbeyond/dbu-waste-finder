@@ -80,6 +80,5 @@ the MCP server tests (mocked query results) and landing-page checks. No workspac
 - `serverless_jobs` verified live 2026-10-26 ~16:40Z: test job 4 runs / 0 failed (= `job_run_timeline`), 0.215 DBU and $0.08
   (= `system.billing.usage` 0.21454 DBU × $0.35). Billing then covered 13:00–14:00Z only (runs at 13:15 and 13:45Z), so the
   DBUs of the 14:15/14:45Z runs are not yet confirmed.
-- Partial USD totals verified live: `cost_summary` $0.44 known + `usd_complete: false` + `unpriced_skus: [GENIE_FREE_USAGE]`.
 
 Not affiliated with Databricks. "Databricks" is a trademark of Databricks, Inc. MIT licensed, © 2026 Data and Beyond ApS.
