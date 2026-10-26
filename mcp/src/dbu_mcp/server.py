@@ -10,6 +10,10 @@ Runner = Callable[[str], list[dict[str, Any]]]
 
 
 def databricks_runner() -> Runner:
+    """Statement Execution API if DATABRICKS_WAREHOUSE_ID is set, else databricks-sql-connector."""
+    if os.environ.get("DATABRICKS_WAREHOUSE_ID"):
+        from .stmt_api import statement_runner
+        return statement_runner()
     from databricks import sql  # databricks-sql-connector
 
     host = os.environ["DATABRICKS_HOST"].removeprefix("https://").rstrip("/")

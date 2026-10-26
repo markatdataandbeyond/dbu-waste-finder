@@ -18,6 +18,10 @@ python -m venv .venv && .venv/bin/pip install -e .
 ```
 Env: `DATABRICKS_HOST` (e.g. `adb-123.azuredatabricks.net`), `DATABRICKS_HTTP_PATH` (warehouse → Connection details), `DATABRICKS_TOKEN`.
 
+**Two ways to connect** (both read-only):
+- `DATABRICKS_WAREHOUSE_ID` set → uses the SQL Statement Execution API over HTTPS (no `DATABRICKS_HTTP_PATH` needed). Env: `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_WAREHOUSE_ID` (warehouse → Overview, or the id at the end of the HTTP path).
+- Otherwise → `databricks-sql-connector` with `DATABRICKS_HTTP_PATH` as above.
+
 ### Claude Desktop (`claude_desktop_config.json`)
 ```json
 {"mcpServers": {"dbu-waste-finder": {

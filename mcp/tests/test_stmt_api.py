@@ -31,3 +31,17 @@ def test_statement_runner_empty_result_and_error():
             statement_runner("h", "t", "w")("q"); assert False
         except RuntimeError as e:
             assert "TABLE_OR_VIEW_NOT_FOUND" in str(e)
+
+
+def test_server_picks_runner_by_env(monkeypatch):
+    import sys, types
+    from dbu_mcp import server
+    monkeypatch.setenv("DATABRICKS_HOST", "h"); monkeypatch.setenv("DATABRICKS_TOKEN", "t")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "w")
+    with mock.patch("dbu_mcp.stmt_api.statement_runner", return_value="STMT") as sr:
+        assert server.databricks_runner() == "STMT"; sr.assert_called_once()
+    monkeypatch.delenv("DATABRICKS_WAREHOUSE_ID"); monkeypatch.setenv("DATABRICKS_HTTP_PATH", "/p")
+    fake = types.ModuleType("databricks"); fake.sql = types.SimpleNamespace(connect=None)
+    monkeypatch.setitem(sys.modules, "databricks", fake)
+    with mock.patch("dbu_mcp.stmt_api.statement_runner") as sr:
+        assert callable(server.databricks_runner()); sr.assert_not_called()
