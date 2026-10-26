@@ -6,6 +6,13 @@ from dbu_mcp import queries, fixes, _vendored
 from dbu_mcp.server import build
 
 MOCK = {
+    "est_idle_dbus": [{"warehouse_id": "wh1", "warehouse_size": "2X_SMALL", "uptime_min": 61.0, "busy_min": 1,
+                       "idle_pct": 98.4, "est_idle_dbus": 4.0}],
+    "est_waste_dbus": [{"job_id": "j7", "dbus": 2.0, "list_cost_usd": 1.4, "runs": 4, "failed_runs": 1,
+                        "est_waste_dbus": 0.5, "est_saving_usd": 0.35},
+                       {"job_id": "j8", "dbus": 1.0, "list_cost_usd": 0.7, "runs": 2, "failed_runs": 0,
+                        "est_waste_dbus": 0.0, "est_saving_usd": 0.0}],
+    "auto_stop_minutes DESC": [{"warehouse_id": "wh1", "auto_stop_minutes": 90}],
     "billing_origin_product, ROUND": [{"billing_origin_product": "JOBS", "list_cost_usd": 700.0},
                                        {"billing_origin_product": "ALL_PURPOSE", "list_cost_usd": 300.0}],
     "SELECT usage_date, ROUND": [{"usage_date": "2026-10-01", "list_cost_usd": 33.3}],
@@ -64,7 +71,10 @@ def test_top_cost_drivers(srv):
 
 def test_find_waste_saving_scaled_to_month(srv):
     r = call(srv, "find_waste", days=15)
-    assert r["est_monthly_saving_usd"] == 400.0  # (165+35)*30/15
+    assert r["est_monthly_saving_usd"] == 400.7  # (165+35+0.35 failed serverless run)*30/15
+    assert r["est_monthly_waste_dbus"] == 9.0      # (4 idle wh + 0.5 failed run)*30/15
+    assert r["warehouse_long_autostop"][0]["auto_stop_minutes"] == 90
+    assert r["idle_warehouse"][0]["warehouse_id"] == "wh1"
     assert r["missing_autotermination"][0]["cluster_id"] == "c2"
     assert "errors" not in r
 
@@ -75,7 +85,7 @@ def test_find_waste_degrades_when_schema_missing():
             raise RuntimeError("TABLE_OR_VIEW_NOT_FOUND system.compute.node_timeline")
         return runner(q)
     r = call(build(r2), "find_waste")
-    assert "idle_or_oversized" in r["errors"] and r["est_monthly_saving_usd"] == 165.0
+    assert "idle_or_oversized" in r["errors"] and r["est_monthly_saving_usd"] == 165.35
 
 
 def test_explain_cost_spike(srv):
@@ -144,3 +154,56 @@ def test_propose_fix_errors():
         fixes.propose(BUNDLE, "all_purpose_job", "missing")
     with pytest.raises(ValueError):
         fixes.propose(BUNDLE, "bogus", "nightly_etl")
+
+
+# --- empty list_prices: USD must be unknown (None), never $0; DBUs still reported ---
+def test_unknown_price_is_none_not_zero():
+    def r3(q):
+        if "billing_origin_product, ROUND" in q:
+            return [{"billing_origin_product": "SQL", "dbus": 4.2, "list_cost_usd": None}]
+        if "SELECT usage_date, ROUND" in q:
+            return [{"usage_date": "2026-10-26", "dbus": 4.2, "list_cost_usd": None}]
+        if "est_waste_dbus" in q:
+            return [{"job_id": "j7", "dbus": 2.0, "list_cost_usd": None, "runs": 4, "failed_runs": 1,
+                     "est_waste_dbus": 0.5, "est_saving_usd": None}]
+        if "jobs_using_cluster" in q or "avg_cpu_pct" in q:
+            return []
+        if "delta_usd" in q:
+            return [{"resource_id": "wh1", "day_dbus": 4.2, "delta_dbus": 4.2, "delta_usd": None}]
+        return runner(q)
+    srv = build(r3)
+    cs = call(srv, "cost_summary")
+    assert cs["total_list_cost_usd"] is None and cs["total_dbus"] == 4.2 and "cost_unknown" in cs
+    fw = call(srv, "find_waste", days=30)
+    assert fw["est_monthly_saving_usd"] is None and "cost_unknown" in fw
+    assert fw["est_monthly_waste_dbus"] == 4.5
+    sp = call(srv, "explain_cost_spike", date="2026-10-26")
+    assert sp["net_delta_top15_usd"] is None and sp["net_delta_top15_dbus"] == 4.2
+
+
+def test_serverless_queries_rendered(srv):
+    call(srv, "find_waste", max_autotermination_minutes=45, warehouse_idle_pct=70)
+    wh = [q for q in seen if "system.compute.warehouses" in q and "auto_stop_minutes DESC" in q][0]
+    assert "auto_stop_minutes > 45" in wh and "auto_stop_minutes = 0" in wh
+    idle = [q for q in seen if "est_idle_dbus" in q][0]
+    assert "system.compute.warehouse_events" in idle and "system.query.history" in idle and ">= 70.0" in idle
+    assert any("system.lakeflow.job_run_timeline" in q and "SERVERLESS" in q for q in seen)
+
+
+WH_BUNDLE = """
+resources:
+  sql_warehouses:
+    bi:
+      name: bi
+      cluster_size: 2X-Small
+      auto_stop_mins: 90
+"""
+
+
+def test_propose_fix_warehouse_autostop(srv):
+    d = call(srv, "propose_fix", bundle_yaml=WH_BUNDLE, issue="warehouse_autostop", resource_key="bi")
+    assert "-      auto_stop_mins: 90" in d and "+      auto_stop_mins: 10" in d
+    with pytest.raises(ValueError):
+        fixes.propose(WH_BUNDLE, "warehouse_autostop", "bi", minutes=0 or 999)
+    with pytest.raises(KeyError):
+        fixes.propose(WH_BUNDLE, "warehouse_autostop", "nope")

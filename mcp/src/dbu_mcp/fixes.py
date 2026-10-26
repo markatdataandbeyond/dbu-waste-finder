@@ -2,7 +2,8 @@
 
 DAB schema: resources.jobs.<key>.tasks[].existing_cluster_id / job_cluster_key,
 resources.jobs.<key>.job_clusters[].{job_cluster_key,new_cluster};
-resources.clusters.<key>.autotermination_minutes (Clusters API field).
+resources.clusters.<key>.autotermination_minutes (Clusters API field);
+resources.sql_warehouses.<key>.auto_stop_mins (SQL Warehouses API field).
 Nothing is applied; we only return a unified diff for a human to review/commit.
 """
 import copy
@@ -55,6 +56,17 @@ def fix_autotermination(doc: dict, cluster_key: str, minutes: int = 20) -> dict:
     return new
 
 
+def fix_warehouse_autostop(doc: dict, warehouse_key: str, minutes: int = 10) -> dict:
+    whs = (doc.get("resources") or {}).get("sql_warehouses") or {}
+    if warehouse_key not in whs:
+        raise KeyError(f"warehouse '{warehouse_key}' not found under resources.sql_warehouses")
+    if not 1 <= int(minutes) <= 60:  # serverless allows >=1 min (UI min 5); keep it short
+        raise ValueError("auto_stop_mins must be 1..60")
+    new = copy.deepcopy(doc)
+    new["resources"]["sql_warehouses"][warehouse_key]["auto_stop_mins"] = int(minutes)
+    return new
+
+
 def propose(bundle_yaml: str, issue: str, resource_key: str, path: str = "databricks.yml",
             **kw) -> str:
     doc = yaml.safe_load(bundle_yaml) or {}
@@ -65,6 +77,8 @@ def propose(bundle_yaml: str, issue: str, resource_key: str, path: str = "databr
                                     kw.get("num_workers") or 2)
     elif issue == "no_autotermination":
         after = fix_autotermination(doc, resource_key, kw.get("minutes") or 20)
+    elif issue == "warehouse_autostop":
+        after = fix_warehouse_autostop(doc, resource_key, kw.get("minutes") or 10)
     else:
-        raise ValueError("issue must be 'all_purpose_job' or 'no_autotermination'")
+        raise ValueError("issue must be 'all_purpose_job', 'no_autotermination' or 'warehouse_autostop'")
     return _diff(before, _dump(after), path)
