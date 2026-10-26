@@ -19,8 +19,10 @@ Tools:
 Costs are at list price (`system.billing.list_prices`), not your discount.
 
 ## Privacy
-The MCP server runs on your machine and sends query results (resource names/ids, DBUs, list-price amounts, owners' email addresses)
-to your AI client and its provider. The notebook, by contrast, keeps everything inside the workspace.
+- **Notebook:** runs inside your workspace, read-only; nothing leaves the workspace.
+- **MCP server:** runs on your machine and sends its query results (job/cluster/warehouse names and ids, DBUs, list-price amounts,
+  owners' email addresses) to your AI client and thereby to that AI provider. Use a read-only service principal and only connect it
+  to an AI client you may share that metadata with. Nothing is sent to Data and Beyond.
 
 ## Requirements
 Unity Catalog with `system.billing`, `system.compute`, `system.lakeflow` enabled; a SQL warehouse;
@@ -29,7 +31,7 @@ a token for a principal with only `SELECT` on those schemas (use a service princ
 ## Install
 ```bash
 git clone https://github.com/markatdataandbeyond/dbu-waste-finder && cd dbu-waste-finder/mcp
-python -m venv .venv && .venv/bin/pip install -e .
+python3 -m venv .venv && .venv/bin/pip install -e .
 ```
 Env: `DATABRICKS_HOST` (e.g. `adb-123.azuredatabricks.net`), `DATABRICKS_HTTP_PATH` (warehouse → Connection details), `DATABRICKS_TOKEN`.
 

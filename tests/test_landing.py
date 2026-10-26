@@ -75,3 +75,27 @@ def test_validation_status_not_stale():
     vs = README.split("## Validation status", 1)[1]
     assert "USD unknown" not in vs
     assert "partial" in vs.lower() and "GENIE_FREE_USAGE" in vs
+
+
+MCP_README = (ROOT / "mcp/README.md").read_text()
+DOCS = {"docs/index.html": _text(PAGE), "README.md": README, "mcp/README.md": MCP_README}
+
+
+def test_install_lines_use_python3():
+    # systems with only python3 (Debian/Ubuntu, macOS) have no `python`
+    for name, t in (("README.md", README), ("mcp/README.md", MCP_README)):
+        assert not re.search(r"(?<![\w/.])python -m venv", t), f"{name} uses bare `python -m venv`"
+        assert "python3 -m venv" in t, f"{name} has no python3 venv install line"
+
+
+def test_privacy_split_everywhere():
+    # every doc must say: notebook -> nothing leaves; MCP -> results go to the AI client and its provider,
+    # listing names, ids, amounts and owner emails
+    for name, t in DOCS.items():
+        low = " ".join(t.split()).lower()
+        assert "privacy" in low, f"{name} lacks a Privacy section"
+        assert re.search(r"nothing (leaves|is sent anywhere)", low), f"{name}: notebook 'nothing leaves' missing"
+        assert "ai client" in low and "provider" in low, f"{name}: MCP -> AI client/provider missing"
+        for k in ("names", "ids", "amounts", "email"):
+            assert k in low, f"{name}: MCP privacy text does not mention {k!r}"
+        assert "nothing is sent to data and beyond" in low or "nothing is sent to us" in low, name
