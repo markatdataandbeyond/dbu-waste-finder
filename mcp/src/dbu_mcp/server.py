@@ -1,5 +1,6 @@
 """DBU Waste Finder MCP server: Databricks cost diagnosis + fix proposals. Read-only."""
 import os
+import re
 from typing import Any, Callable
 
 from mcp.server.mcpserver import MCPServer
@@ -33,6 +34,30 @@ def _sum_or_none(vals):
     """Sum of USD values; None (= unknown, list_prices missing) if any value is None. Never a fake $0."""
     vals = list(vals)
     return None if any(v is None for v in vals) else round(sum(float(v) for v in vals), 2)
+
+
+_TABLE_RE = re.compile(r"\bsystem\.[a-z_]+\.[a-z_]+\b")
+
+
+def _access_error(q: str, e: Exception) -> dict:
+    """Turn a failed check into a concrete, actionable error: which system tables, why, how to fix."""
+    msg = str(e)
+    tables = sorted(set(_TABLE_RE.findall(q)))
+    up = msg.upper()
+    if "PERMISSION" in up or "NOT AUTHORIZED" in up or "ACCESS DENIED" in up or "INSUFFICIENT" in up:
+        reason = "permission_denied"
+        hit = [t for t in tables if t in msg] or tables
+        fix = "; ".join(f"GRANT SELECT ON TABLE {t} TO <principal>" for t in hit) + \
+              " (plus USE CATALOG system and USE SCHEMA on the schema)"
+        tables = hit
+    elif "NOT_FOUND" in up or "NOT FOUND" in up or "CANNOT BE FOUND" in up or "DOES NOT EXIST" in up:
+        reason = "table_not_found"
+        fix = ("Enable the system schema (account admin: Catalog Explorer > system, or "
+               "`databricks system-schemas enable`) for: " + ", ".join(sorted({t.rsplit('.', 1)[0] for t in tables})))
+    else:
+        reason = "query_failed"
+        fix = "Check the SQL warehouse and that these tables are readable: " + ", ".join(tables)
+    return {"reason": reason, "tables": tables, "fix": fix, "error": msg[:300]}
 
 
 def _f(x) -> float:
@@ -70,32 +95,54 @@ def build(runner: Runner | None = None) -> MCPServer:
 
     @mcp.tool()
     def find_waste(days: int = 30, max_autotermination_minutes: int = 60,
-                   warehouse_idle_pct: float = 80.0) -> dict:
+                   warehouse_idle_pct: float = 80.0, max_rows: int = 50) -> dict:
         """Classic: jobs on all-purpose compute, clusters without/with long auto-termination, idle clusters.
-        Serverless: SQL warehouses with no/long auto-stop, idle SQL warehouses (uptime vs query time),
-        serverless job cost incl. failed runs. Returns estimated monthly saving in USD (None = unknown
-        because list_prices is missing) and wasted DBUs."""
-        out, errors = {}, {}
+        Serverless: SQL warehouses with no/long auto-stop (incl. deleted in the window), idle SQL warehouses
+        (uptime vs query time), serverless job cost incl. failed runs. Max `max_rows` rows per check
+        (sorted by impact). Saving in USD is None when unknown (missing price or missing access);
+        failed checks are listed under `errors` with the table and the fix."""
+        max_rows = int(max_rows)
+        if not 1 <= max_rows <= 1000:
+            raise ValueError("max_rows must be 1..1000")
+        out, errors, truncated = {}, {}, {}
         for k in ("jobs_on_all_purpose", "missing_autotermination", "idle_or_oversized",
                   "warehouse_long_autostop", "idle_warehouse", "serverless_jobs"):
+            q = queries.render(queries.WASTE[k], days, maxterm=max_autotermination_minutes,
+                               idle_pct=warehouse_idle_pct) + f"\nLIMIT {max_rows + 1}"
             try:
-                out[k] = run(queries.render(queries.WASTE[k], days, maxterm=max_autotermination_minutes,
-                                            idle_pct=warehouse_idle_pct))
-            except Exception as e:  # e.g. system.compute not enabled
-                errors[k] = str(e)[:300]
+                rows = run(q)
+            except Exception as e:  # e.g. system schema not enabled / no SELECT
+                errors[k] = _access_error(q, e)
+                continue
+            if len(rows) > max_rows:
+                rows, truncated[k] = rows[:max_rows], True
+            out[k] = rows
         usd = [r.get("est_saving_if_job_compute_usd") for r in out.get("jobs_on_all_purpose", [])]
         usd += [r.get("est_saving_usd") for r in out.get("idle_or_oversized", [])]
         usd += [r.get("est_saving_usd") for r in out.get("serverless_jobs", []) if r.get("failed_runs")]
         saving = _sum_or_none(usd)
+        saving_checks = {"jobs_on_all_purpose", "idle_or_oversized", "serverless_jobs"}
+        dbu_checks = {"idle_warehouse", "serverless_jobs"}
+        if saving_checks & set(errors) and not (saving_checks - set(errors)):
+            saving = None  # every saving check failed: unknown, not $0
         out["est_monthly_saving_usd"] = None if saving is None else round(saving * 30.0 / days, 2)
-        dbus = sum(_f(r.get("est_idle_dbus")) for r in out.get("idle_warehouse", []))
-        dbus += sum(_f(r.get("est_waste_dbus")) for r in out.get("serverless_jobs", []))
-        out["est_monthly_waste_dbus"] = round(dbus * 30.0 / days, 2)
+        if dbu_checks <= set(errors):
+            out["est_monthly_waste_dbus"] = None
+        else:
+            dbus = sum(_f(r.get("est_idle_dbus")) for r in out.get("idle_warehouse", []))
+            dbus += sum(_f(r.get("est_waste_dbus")) for r in out.get("serverless_jobs", []))
+            out["est_monthly_waste_dbus"] = round(dbus * 30.0 / days, 2)
         if saving is None:
-            out["cost_unknown"] = "Some flagged items have no list price; USD unknown (not $0), see DBUs."
+            out["cost_unknown"] = ("USD unknown (not $0): " + ("some checks failed, see errors"
+                                   if errors else "some flagged items have no list price, see DBUs"))
+        if errors:
+            out.setdefault("notes", []).append(
+                f"{len(errors)} of 6 checks could not run; totals cover only the checks that ran.")
         if out.get("idle_warehouse"):
-            out.setdefault("notes", []).append("Idle-warehouse waste is in DBUs only (size-based rate); "
-                                               "fix with propose_fix issue='warehouse_autostop'.")
+            out.setdefault("notes", []).append("Idle-warehouse waste is in DBUs only (size-based rate), not in "
+                                               "est_monthly_saving_usd; fix with propose_fix issue='warehouse_autostop'.")
+        if truncated:
+            out["truncated"] = truncated
         if errors:
             out["errors"] = errors
         return out

@@ -22,7 +22,10 @@ IDLE_SAVING_SHARE = 0.5     # ASSUMPTION: right-sizing an idle cluster saves ~50
 MAX_AUTOTERM_MIN = 60       # auto-termination / warehouse auto-stop above this is flagged
 WH_IDLE_PCT = 80.0          # warehouse uptime with no query running above this % = idle
 WH_MIN_UPTIME_MIN = 30      # ignore warehouses up less than this many minutes in the window
-MONTH_FACTOR = 30.0 / LOOKBACK_DAYS
+
+def month_factor():
+    # LOOKBACK_DAYS < 1 is invalid (render() raises); never divide by zero here
+    return 30.0 / LOOKBACK_DAYS if LOOKBACK_DAYS >= 1 else 0.0
 
 # Spark SQL. {d} = lookback days. Column names verified against docs.databricks.com
 # (admin/system-tables/billing, /pricing, /compute, /jobs), fetched 2026-10-26.
@@ -112,14 +115,15 @@ WHERE u.avg_cpu < {cpu} AND u.avg_mem < {mem}
 ORDER BY est_saving_usd DESC""",
 
 # warehouses table is SCD2 too. auto_stop_minutes = 0 means never auto-stops.
+# Warehouses deleted inside the window are kept (they burned DBUs before deletion); delete_time shows it.
 "warehouse_long_autostop": """
 WITH latest AS (
   SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id, warehouse_id ORDER BY change_time DESC) AS rn
   FROM system.compute.warehouses
 )
-SELECT workspace_id, warehouse_id, warehouse_name, warehouse_type, warehouse_size, auto_stop_minutes
+SELECT workspace_id, warehouse_id, warehouse_name, warehouse_type, warehouse_size, auto_stop_minutes, delete_time
 FROM latest
-WHERE rn = 1 AND delete_time IS NULL
+WHERE rn = 1 AND (delete_time IS NULL OR delete_time >= date_add(current_date(), -{d}))
   AND (auto_stop_minutes IS NULL OR auto_stop_minutes = 0 OR auto_stop_minutes > {maxterm})
 ORDER BY auto_stop_minutes DESC NULLS FIRST""",
 
@@ -186,6 +190,8 @@ ORDER BY dbus DESC""",
 }
 
 def render(name):
+    if not 1 <= int(LOOKBACK_DAYS) <= 365:
+        raise ValueError(f"LOOKBACK_DAYS must be 1..365, got {LOOKBACK_DAYS}")
     return QUERIES[name].format(d=int(LOOKBACK_DAYS), maxterm=int(MAX_AUTOTERM_MIN),
                                 idle_share=IDLE_SAVING_SHARE, cpu=IDLE_CPU_PCT, mem=IDLE_MEM_PCT,
                                 idle_pct=float(WH_IDLE_PCT), min_up=int(WH_MIN_UPTIME_MIN))
@@ -216,13 +222,13 @@ def summarize(rows_by_check):
                 s += float(r[col])
             elif name != "serverless_jobs" or r.get("failed_runs"):
                 unknown = True  # flagged waste whose price is missing
-    return None if unknown else round(s * MONTH_FACTOR, 2)
+    return None if unknown else round(s * month_factor(), 2)
 
 
 def summarize_dbus(rows_by_check):
     """Monthly DBUs flagged as waste by the DBU-based checks (works without list_prices)."""
     s = sum(float(r.get(col) or 0) for name, col in WASTE_DBU_COLS for r in rows_by_check.get(name, []))
-    return round(s * MONTH_FACTOR, 2)
+    return round(s * month_factor(), 2)
 
 # COMMAND ----------
 

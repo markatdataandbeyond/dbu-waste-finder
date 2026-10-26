@@ -33,8 +33,9 @@ def make_db(empty_prices=False):
      ('w1','wh1','bi-idle','PRO','2X_SMALL',10, current_timestamp-INTERVAL 3 DAY, NULL::TIMESTAMP),
      ('w1','wh1','bi-idle','PRO','2X_SMALL',90, current_timestamp-INTERVAL 2 DAY, NULL::TIMESTAMP),
      ('w1','wh2','busy','PRO','SMALL',10, current_timestamp-INTERVAL 2 DAY, NULL::TIMESTAMP),
-     ('w1','wh3','gone','PRO','SMALL',0, current_timestamp-INTERVAL 2 DAY, current_timestamp-INTERVAL 1 DAY),
-     ('w1','wh4','never-stops','PRO','X_SMALL',0, current_timestamp-INTERVAL 2 DAY, NULL::TIMESTAMP)
+     ('w1','wh3','gone','PRO','SMALL',0, current_timestamp-INTERVAL 2 DAY, (current_timestamp-INTERVAL 1 DAY)::TIMESTAMP),
+     ('w1','wh4','never-stops','PRO','X_SMALL',0, current_timestamp-INTERVAL 2 DAY, NULL::TIMESTAMP),
+     ('w1','wh5','old-gone','PRO','SMALL',0, current_timestamp-INTERVAL 99 DAY, (current_timestamp-INTERVAL 90 DAY)::TIMESTAMP)
     ) t(workspace_id,warehouse_id,warehouse_name,warehouse_type,warehouse_size,auto_stop_minutes,change_time,delete_time)""")
     con.execute("""
     CREATE TABLE compute_warehouse_events AS
@@ -109,7 +110,11 @@ def test_notebook_queries_on_mock_system_tables():
     assert abs(ap[0]["est_saving_if_job_compute_usd"] - round(55*(1-0.15/0.55), 2)) < 0.01  # 40.0
     idle = res["idle_or_oversized"]; assert [r["cluster_id"] for r in idle] == ["c_idle"] and idle[0]["est_saving_usd"] == 13.75
     # serverless
-    assert {r["warehouse_id"] for r in res["warehouse_long_autostop"]} == {"wh1", "wh4"}  # 90 > 60, 0 = never; wh3 deleted
+    # 90 > 60, 0 = never; wh3 deleted 1 day ago = inside window -> included (it burned DBUs before deletion);
+    # wh5 deleted 90 days ago -> outside window
+    lng = {r["warehouse_id"]: r for r in res["warehouse_long_autostop"]}
+    assert set(lng) == {"wh1", "wh3", "wh4"}
+    assert lng["wh3"]["delete_time"] is not None and lng["wh1"]["delete_time"] is None
     idle = res["idle_warehouse"]; assert [r["warehouse_id"] for r in idle] == ["wh1"]  # wh2 busy + <30 min up
     assert _f(idle[0]["uptime_min"]) == 60.0 and idle[0]["busy_min"] == 1 and _f(idle[0]["est_idle_dbus"]) == 3.93
     sj = res["serverless_jobs"]; assert len(sj) == 1 and sj[0]["job_id"] == "j7"
@@ -130,3 +135,14 @@ def test_empty_list_prices_gives_unknown_usd_not_zero():
     assert res["serverless_jobs"][0]["est_saving_usd"] is None and _f(res["serverless_jobs"][0]["est_waste_dbus"]) == 1.0
     assert nb["summarize"](res) is None            # unknown, not $0
     assert nb["summarize_dbus"](res) == 4.93
+
+
+def test_lookback_zero_no_division_by_zero(tmp_path):
+    src = pathlib.Path(NB).read_text().replace("LOOKBACK_DAYS = 30", "LOOKBACK_DAYS = 0", 1)
+    f = tmp_path / "nb0.py"; f.write_text(src)
+    nb = runpy.run_path(str(f))                     # must not raise ZeroDivisionError at import
+    import pytest
+    with pytest.raises(ValueError, match="LOOKBACK_DAYS"):
+        nb["render"]("cost_by_product")
+    assert nb["summarize"]({}) == 0.0               # no ZeroDivisionError
+    assert nb["summarize_dbus"]({}) == 0.0

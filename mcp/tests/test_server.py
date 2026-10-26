@@ -207,3 +207,33 @@ def test_propose_fix_warehouse_autostop(srv):
         fixes.propose(WH_BUNDLE, "warehouse_autostop", "bi", minutes=0 or 999)
     with pytest.raises(KeyError):
         fixes.propose(WH_BUNDLE, "warehouse_autostop", "nope")
+
+
+# --- missing access: concrete per-check error, never a fake $0 saving ---
+def test_find_waste_no_access_gives_concrete_errors_not_zero():
+    def deny(q):
+        if "system.compute" in q:
+            raise RuntimeError("[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table 'system.compute.clusters'.")
+        raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] The table or view `system`.`billing`.`usage` cannot be found.")
+    r = call(build(deny), "find_waste")
+    assert r["est_monthly_saving_usd"] is None and r["est_monthly_waste_dbus"] is None
+    assert set(r["errors"]) == {"jobs_on_all_purpose", "missing_autotermination", "idle_or_oversized",
+                                "warehouse_long_autostop", "idle_warehouse", "serverless_jobs"}
+    e = r["errors"]["warehouse_long_autostop"]
+    assert e["reason"] == "permission_denied" and e["tables"] == ["system.compute.warehouses"]
+    assert "GRANT SELECT ON TABLE system.compute.warehouses" in e["fix"]
+    e = r["errors"]["serverless_jobs"]
+    assert e["reason"] == "table_not_found" and "system.billing.usage" in e["tables"]
+    assert "system schema" in e["fix"]
+    assert "jobs_on_all_purpose" not in r  # failed checks are not shown as empty = "no waste"
+
+
+def test_find_waste_row_limit():
+    many = [{"cluster_id": f"c{i}", "est_saving_usd": 1.0} for i in range(500)]
+    qs = []
+    def r4(q):
+        qs.append(q)
+        return many if "avg_cpu_pct" in q else []
+    r = call(build(r4), "find_waste", max_rows=25)
+    assert len(r["idle_or_oversized"]) == 25 and r["truncated"] == {"idle_or_oversized": True}
+    assert all(q.rstrip().endswith("LIMIT 26") for q in qs)
