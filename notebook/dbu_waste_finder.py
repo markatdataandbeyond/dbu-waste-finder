@@ -23,12 +23,7 @@ MAX_AUTOTERM_MIN = 60       # auto-termination / warehouse auto-stop above this 
 WH_IDLE_PCT = 80.0          # warehouse uptime with no query running above this % = idle
 WH_MIN_UPTIME_MIN = 30      # ignore warehouses up less than this many minutes in the window
 
-def month_factor():
-    # LOOKBACK_DAYS < 1 is invalid (render() raises); never divide by zero here
-    try:
-        return 30.0 / validate_lookback(LOOKBACK_DAYS)
-    except ValueError:
-        return 0.0
+MIN_CONFIDENT_DAYS = 7      # less observed data than this -> projection is flagged low_confidence
 
 # Spark SQL. {d} = lookback days. Column names verified against docs.databricks.com
 # (admin/system-tables/billing, /pricing, /compute, /jobs), fetched 2026-10-26.
@@ -117,6 +112,19 @@ SELECT u.cluster_id, ROUND(u.avg_cpu, 1) AS avg_cpu_pct, ROUND(u.avg_mem, 1) AS 
 FROM util u JOIN cost c ON u.cluster_id = c.cluster_id
 WHERE u.avg_cpu < {cpu} AND u.avg_mem < {mem}
 ORDER BY est_saving_usd DESC""",
+
+# observation_days = how much data the window actually covers: from the earliest record inside the lookback
+# window (billing.usage.usage_start_time or warehouse_events.event_time) until now, capped at LOOKBACK_DAYS.
+# A workspace created yesterday has ~1 observed day even with a 30-day lookback.
+"observation": """
+WITH t AS (
+  SELECT usage_start_time AS ts FROM system.billing.usage WHERE usage_date >= date_add(current_date(), -{d})
+  UNION ALL
+  SELECT event_time AS ts FROM system.compute.warehouse_events WHERE event_time >= date_add(current_date(), -{d})
+)
+SELECT ROUND(LEAST(TIMESTAMPDIFF(SECOND, MIN(ts), current_timestamp()) / 86400.0, {d}), 2) AS observation_days,
+       MIN(ts) AS first_record
+FROM t""",
 
 # SKUs used in the window that have no list price (their cost is excluded from USD totals).
 "unpriced_skus": PRICED_USAGE + """
@@ -243,13 +251,30 @@ WASTE_DBU_COLS = (("idle_warehouse", "est_idle_dbus"), ("serverless_jobs", "est_
 ID_COLS = ("cluster_id", "warehouse_id", "job_id")
 
 
+def project(measured_usd, measured_dbu, observation_days):
+    """Measured waste in the observed period -> 30-day projection: measured / observation_days * 30.
+    No projection without observed data; low_confidence below MIN_CONFIDENT_DAYS."""
+    obs = None if observation_days is None else float(observation_days)
+    ok = obs is not None and obs > 0
+    out = {"measured_saving_usd": measured_usd, "measured_waste_dbu": measured_dbu, "observation_days": obs,
+           "projected_30d_usd": round(measured_usd / obs * 30, 2) if ok and measured_usd is not None else None,
+           "projected_30d_dbu": round(measured_dbu / obs * 30, 2) if ok and measured_dbu is not None else None,
+           "low_confidence": not ok or obs < MIN_CONFIDENT_DAYS}
+    if out["low_confidence"]:
+        out["note"] = (f"low_confidence: only {obs if obs is not None else 0} days of data (fewer than "
+                       f"{MIN_CONFIDENT_DAYS}); the 30-day projection is a rough extrapolation, not a forecast.")
+    return out
+
+
 def summarize(rows_by_check):
-    """Monthly saving estimate (USD, list price) over the PRICED items only. Items without a price are
-    listed by unpriced(); a missing price never turns the known amount into NULL or $0-for-everything."""
+    """Measured saving (USD, list price, PRICED items only) and wasted DBUs in the window, plus the 30-day
+    projection based on observation_days. Unpriced items are listed by unpriced()."""
     s = 0.0
     for name, col in SAVING_COLS:
         s += sum(float(r[col]) for r in rows_by_check.get(name, []) if r.get(col) is not None)
-    return round(s * month_factor(), 2)
+    dbu = sum(float(r.get(col) or 0) for name, col in WASTE_DBU_COLS for r in rows_by_check.get(name, []))
+    obs_rows = rows_by_check.get("observation") or [{}]
+    return project(round(s, 2), round(dbu, 2), obs_rows[0].get("observation_days"))
 
 
 def unpriced(rows_by_check):
@@ -263,11 +288,6 @@ def unpriced(rows_by_check):
     return {"complete": not items and not skus, "skus": skus, "items": items}
 
 
-def summarize_dbus(rows_by_check):
-    """Monthly DBUs flagged as waste by the DBU-based checks (works without list_prices)."""
-    s = sum(float(r.get(col) or 0) for name, col in WASTE_DBU_COLS for r in rows_by_check.get(name, []))
-    return round(s * month_factor(), 2)
-
 # COMMAND ----------
 
 if "spark" in globals():
@@ -276,12 +296,16 @@ if "spark" in globals():
         print(f"== {name}")
         display(df)  # noqa: F821
     rows = {k: [r.asDict() for r in v.collect()] for k, v in results.items()}
-    usd, miss = summarize(rows), unpriced(rows)
-    usd_txt = f"~${usd:,.0f}/month" + ("" if miss["complete"] else
+    sm, miss = summarize(rows), unpriced(rows)
+    usd_txt = (f"measured ${sm['measured_saving_usd']:,.2f} in {sm['observation_days']} observed days; "
+               f"projected 30 days: {sm['projected_30d_usd']}") + ("" if miss["complete"] else
               f" (INCOMPLETE: no list price for SKUs {miss['skus']} / items {miss['items']})")
-    print(f"Estimated saving at list price: {usd_txt} "
+    print(f"Waste at list price: {usd_txt} "
           f"(overlap between checks possible; idle saving share is an assumption: {IDLE_SAVING_SHARE:.0%}).")
-    print(f"Waste in DBUs (idle warehouses + failed serverless runs): ~{summarize_dbus(rows):,.1f} DBU/month")
+    print(f"Waste in DBUs (idle warehouses + failed serverless runs): measured {sm['measured_waste_dbu']}, "
+          f"projected 30 days {sm['projected_30d_dbu']}")
+    if sm.get("note"):
+        print(sm["note"])
     print(f"Clusters missing/long auto-termination: {len(rows.get('missing_autotermination', []))}")
     print(f"Warehouses with long/no auto-stop: {len(rows.get('warehouse_long_autostop', []))}")
 

@@ -58,3 +58,14 @@ def test_privacy_honest_about_mcp():
     assert "email addresses" in t
     r = README.lower()
     assert "mcp server runs on your machine" in r and "ai client" in r
+
+
+SAVINGS_PROMISE = re.compile(r"\b(save|saves|saved|saving|savings)\b|can cut|cut your|reduce your (bill|cost)|lower your (bill|cost)",
+                             re.IGNORECASE)
+
+
+def test_no_savings_promises_on_page_or_readmes():
+    for name, txt in (("landing", _text(PAGE)), ("README", README), ("mcp/README", (ROOT / "mcp/README.md").read_text())):
+        hits = SAVINGS_PROMISE.findall(txt)
+        assert not hits, f"{name} promises savings: {hits}"
+    assert "observation_days" in README and "low_confidence" in README  # projection method documented

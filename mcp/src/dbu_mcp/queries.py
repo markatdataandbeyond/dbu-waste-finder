@@ -26,8 +26,9 @@ try:  # inside the repo: reuse the notebook's queries directly (single source of
                                           "warehouse_long_autostop", "idle_warehouse", "serverless_jobs")}
     COST_BY_PRODUCT = _nb.QUERIES["cost_by_product"]
     UNPRICED = _nb.QUERIES["unpriced_skus"]
+    OBSERVATION = _nb.QUERIES["observation"]
 except FileNotFoundError:  # pragma: no cover - packaged install ships _vendored.py
-    from ._vendored import PRICED_USAGE, WASTE, COST_BY_PRODUCT, UNPRICED  # type: ignore
+    from ._vendored import PRICED_USAGE, WASTE, COST_BY_PRODUCT, UNPRICED, OBSERVATION  # type: ignore
 
 DAILY_COST = PRICED_USAGE + """
 SELECT usage_date, ROUND(SUM(dbus), 3) AS dbus,

@@ -12,7 +12,8 @@ Tools:
   check exceeds the 100,000-row fetch cap).
   A check that can't run (no SELECT / schema not enabled) appears under `errors` with `reason`, `tables` and the `fix` (e.g. the GRANT);
   totals are then `null`, not $0. `days` outside 1..365 (or not an integer) gives one clear error and runs no query.
-  Prices: `est_monthly_saving_usd` sums the priced items; `usd_complete`, `unpriced_items` and `unpriced_skus` show what is missing.
+  Totals: `measured_saving_usd`/`measured_waste_dbu` (window), `observation_days` (actual data coverage), `projected_30d_usd`/`_dbu`
+  (= measured ÷ observation_days × 30) and `low_confidence` (< 7 days); see root README. USD covers priced items; `usd_complete`, `unpriced_items` and `unpriced_skus` show what is missing.
 - `propose_fix(bundle_yaml, issue, resource_key)` – `all_purpose_job` | `no_autotermination` | `warehouse_autostop`
   (sets `resources.sql_warehouses.<key>.auto_stop_mins`, default 10). Returns a diff; nothing is applied.
 Costs are at list price (`system.billing.list_prices`), not your discount.

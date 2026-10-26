@@ -72,6 +72,23 @@ def _known_sum(vals) -> float:
     return round(sum(float(v) for v in vals if v is not None), 2)
 
 
+MIN_CONFIDENT_DAYS = 7
+
+
+def _project(measured_usd, measured_dbu, observation_days) -> dict:
+    """Same rule as the notebook's project(): measured / observation_days * 30; low_confidence below 7 days."""
+    obs = None if observation_days is None else float(observation_days)
+    ok = obs is not None and obs > 0
+    out = {"measured_saving_usd": measured_usd, "measured_waste_dbu": measured_dbu, "observation_days": obs,
+           "projected_30d_usd": round(measured_usd / obs * 30, 2) if ok and measured_usd is not None else None,
+           "projected_30d_dbu": round(measured_dbu / obs * 30, 2) if ok and measured_dbu is not None else None,
+           "low_confidence": not ok or obs < MIN_CONFIDENT_DAYS}
+    if out["low_confidence"]:
+        out["note"] = (f"low_confidence: only {obs if obs is not None else 0} days of data (fewer than "
+                       f"{MIN_CONFIDENT_DAYS}); projected_30d_* is a rough extrapolation, not a forecast.")
+    return out
+
+
 def _days(days) -> int:
     try:
         return queries.validate_days(days)
@@ -140,7 +157,9 @@ def build(runner: Runner | None = None) -> MCPServer:
     @mcp.tool()
     def find_waste(days: int = 30, max_autotermination_minutes: int = 60,
                    warehouse_idle_pct: float = 80.0, max_rows: int = 50) -> dict:
-        """Classic: jobs on all-purpose compute, clusters without/with long auto-termination, idle clusters.
+        """Returns measured_saving_usd / measured_waste_dbu for the window, observation_days (actual data coverage),
+        projected_30d_usd/_dbu = measured / observation_days * 30, and low_confidence (< 7 observed days).
+        Classic: jobs on all-purpose compute, clusters without/with long auto-termination, idle clusters.
         Serverless: SQL warehouses with no/long auto-stop (incl. deleted in the window), idle SQL warehouses
         (uptime vs query time), serverless job cost incl. failed runs. Max `max_rows` rows per check
         (sorted by impact). Saving in USD is None when unknown (missing price or missing access);
@@ -174,13 +193,24 @@ def build(runner: Runner | None = None) -> MCPServer:
         saving_checks = {"jobs_on_all_purpose", "idle_or_oversized", "serverless_jobs", "idle_warehouse"}
         dbu_checks = {"idle_warehouse", "serverless_jobs"}
         all_failed = saving_checks <= set(errors)
-        out["est_monthly_saving_usd"] = None if all_failed else round(saving * 30.0 / days, 2)
+        measured_usd = None if all_failed else saving
         if dbu_checks <= set(errors):
-            out["est_monthly_waste_dbus"] = None
+            measured_dbu = None
         else:
-            dbus = sum(_f(r.get("est_idle_dbus")) for r in full.get("idle_warehouse", []))
-            dbus += sum(_f(r.get("est_waste_dbus")) for r in full.get("serverless_jobs", []))
-            out["est_monthly_waste_dbus"] = round(dbus * 30.0 / days, 2)
+            measured_dbu = sum(_f(r.get("est_idle_dbus")) for r in full.get("idle_warehouse", []))
+            measured_dbu += sum(_f(r.get("est_waste_dbus")) for r in full.get("serverless_jobs", []))
+            measured_dbu = round(measured_dbu, 2)
+        q = queries.render(queries.OBSERVATION, days)
+        try:
+            obs_rows = run(q)
+        except Exception as e:
+            obs_rows, errors["observation"] = [], _access_error(q, e)
+        obs = obs_rows[0].get("observation_days") if obs_rows else None
+        proj = _project(measured_usd, measured_dbu, obs)
+        note = proj.pop("note", None)
+        out.update(proj)
+        if note:
+            out.setdefault("notes", []).append(note)
         items = []
         for k, col in (("jobs_on_all_purpose", "est_saving_if_job_compute_usd"), ("idle_or_oversized", "est_saving_usd"),
                        ("idle_warehouse", "est_idle_cost_usd"), ("serverless_jobs", "est_saving_usd")):
@@ -196,11 +226,11 @@ def build(runner: Runner | None = None) -> MCPServer:
         if all_failed:
             out["cost_unknown"] = "USD unknown (not $0): every saving check failed, see errors"
         elif not out["usd_complete"]:
-            out["usd_note"] = ("est_monthly_saving_usd is the sum of priced items only; see unpriced_items/"
+            out["usd_note"] = ("measured_saving_usd/projected_30d_usd cover priced items only; see unpriced_items/"
                                "unpriced_skus" + (" and errors" if errors else ""))
         if errors:
             out.setdefault("notes", []).append(
-                f"{len([k for k in errors if k != 'unpriced_skus'])} of 6 checks could not run; totals cover only the checks that ran.")
+                f"{len([k for k in errors if k not in ('unpriced_skus', 'observation')])} of 6 checks could not run; totals cover only the checks that ran.")
         if out.get("idle_warehouse"):
             out.setdefault("notes", []).append("Idle-warehouse waste = idle DBUs (size-based rate) x list price of the "
                                                "warehouse's billed SKU; USD null until its usage is in system.billing. "

@@ -1,6 +1,6 @@
 # DBU Waste Finder
 
-A free, read-only Databricks notebook that finds where your DBUs go and what you can cut, using only
+A free, read-only Databricks notebook that shows where your DBUs go and which resources look wasteful, using only
 Databricks **system tables**. One notebook, no install; the notebook sends nothing out of your workspace.
 
 This repo contains two things:
@@ -13,13 +13,13 @@ Landing page: https://markatdataandbeyond.github.io/dbu-waste-finder/
 | Check | Source tables |
 |---|---|
 | Cost by product and top 20 cost drivers (jobs, warehouses, clusters) at list price | `system.billing.usage` + `system.billing.list_prices` |
-| Jobs running on all-purpose compute, with saving if moved to job compute (ratio from your own `list_prices`) | `system.lakeflow.job_task_run_timeline` (`compute_ids`), `system.compute.clusters` |
+| Jobs running on all-purpose compute, with the list-price difference to job compute (ratio from your own `list_prices`) | `system.lakeflow.job_task_run_timeline` (`compute_ids`), `system.compute.clusters` |
 | All-purpose clusters with auto-termination off (0/NULL) or above 60 min | `system.compute.clusters` (latest SCD row) |
 | Idle or oversized clusters (avg CPU < 10 % and memory < 30 %) | `system.compute.node_timeline` |
 | SQL warehouses with auto-stop off (0) or above 60 min, incl. warehouses deleted inside the window (`warehouse_long_autostop`) | `system.compute.warehouses` (latest SCD row) |
 | Idle SQL warehouses: uptime (`cluster_count` × time between events) vs minutes with a query running; flagged at ≥ 80 % idle and ≥ 30 min up, waste in DBUs from size × list price of the warehouse's billed SKU (USD NULL until its usage is in billing) (`idle_warehouse`) | `system.compute.warehouse_events`, `system.query.history`, `system.compute.warehouses` |
 | Serverless jobs: DBUs and cost per job, runs, failed runs; waste = failed-run share (`serverless_jobs`) | `system.billing.usage` (SKU contains `SERVERLESS`), `system.lakeflow.job_run_timeline` |
-| Estimated monthly saving | USD from all saving checks incl. idle warehouses, scaled to 30 days (NULL if any flagged item has no price), plus wasted DBUs |
+| Measured waste and 30-day projection | see *How the projection works* below |
 
 If a SKU has no row in `system.billing.list_prices` (e.g. `GENIE_FREE_USAGE`), USD totals are the sum of the **priced** part,
 flagged incomplete (`usd_complete = false`), and the unpriced SKUs/items are listed (`unpriced_skus`, `unpriced()` in the notebook,
@@ -30,6 +30,15 @@ flagged incomplete (`usd_complete = false`), and the unpriced SKUs/items are lis
 2. Attach to any compute (serverless works) as a user with `SELECT` on `system.billing`, `system.compute`, `system.lakeflow`.
 3. Adjust thresholds in the first cell, Run all. Checks whose schema isn't enabled are skipped.
 
+## How the projection works
+- `measured_saving_usd` / `measured_waste_dbu`: the waste the checks found **inside the analysis window** (USD = priced items only).
+- `observation_days`: how much data the window actually covers — from the earliest record inside the lookback window in
+  `system.billing.usage` (`usage_start_time`) or `system.compute.warehouse_events` (`event_time`) until now, capped at the lookback.
+  A workspace created yesterday has ~1 observed day even with a 30-day lookback.
+- `projected_30d_usd` / `projected_30d_dbu` = measured ÷ `observation_days` × 30. No projection when `observation_days` is 0 or unknown.
+- `low_confidence: true` (plus a note) when `observation_days` < 7. Exactly 7 days is not flagged.
+- This is an extrapolation of past waste at list price, not a promise of what you will get back.
+
 ## Privacy
 - **Notebook:** runs inside your workspace, read-only; nothing leaves the workspace.
 - **MCP server:** the MCP server runs on your machine, not in the workspace. It reads system tables with your token and returns the
@@ -39,7 +48,7 @@ flagged incomplete (`usd_complete = false`), and the unpriced SKUs/items are lis
 
 ## Caveats
 - Costs use `pricing.effective_list.default` (list price), not your contracted discount.
-- The idle saving (50 %) is an assumption; tune `IDLE_SAVING_SHARE`. Checks can overlap.
+- For idle/oversized clusters, 50 % of their cost is counted as waste (an assumption; tune `IDLE_SAVING_SHARE`). Checks can overlap.
 - Idle-warehouse DBU/h per size (2X-Small 4 … 4X-Large 528) is the published Databricks SQL rate, an assumption; real billed DBUs are in `system.billing.usage`.
 - `system.billing.usage` lags by hours; `system.compute` and `system.query` usually land sooner, so warehouse checks can show results before cost does.
 - `usage_metadata.job_id` is not populated for jobs on all-purpose compute (per Databricks docs), so those are detected via `job_task_run_timeline.compute_ids`.

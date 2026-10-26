@@ -6,6 +6,7 @@ from dbu_mcp import queries, fixes, _vendored
 from dbu_mcp.server import build
 
 MOCK = {
+    "AS observation_days": [{"observation_days": 15.0, "first_record": "2026-10-11T00:00:00Z"}],
     "est_idle_dbus": [{"warehouse_id": "wh1", "warehouse_size": "2X_SMALL", "uptime_min": 61.0, "busy_min": 1,
                        "idle_pct": 98.4, "est_idle_dbus": 4.0, "usd_per_dbu": 0.7, "est_idle_cost_usd": 2.8}],
     "est_waste_dbus": [{"job_id": "j7", "dbus": 2.0, "list_cost_usd": 1.4, "runs": 4, "failed_runs": 1,
@@ -73,8 +74,11 @@ def test_top_cost_drivers(srv):
 
 def test_find_waste_saving_scaled_to_month(srv):
     r = call(srv, "find_waste", days=15)
-    assert r["est_monthly_saving_usd"] == 406.3  # (165+35+0.35 failed run+2.8 idle warehouse)*30/15
-    assert r["est_monthly_waste_dbus"] == 9.0      # (4 idle wh + 0.5 failed run)*30/15
+    assert r["measured_saving_usd"] == 203.15     # 165+35+0.35 failed run+2.8 idle warehouse, measured
+    assert r["measured_waste_dbu"] == 4.5          # 4 idle wh + 0.5 failed run
+    assert r["observation_days"] == 15.0           # from data coverage, not the days=15 argument
+    assert r["projected_30d_usd"] == 406.3 and r["projected_30d_dbu"] == 9.0 and r["low_confidence"] is False
+    assert "est_monthly_saving_usd" not in r
     assert r["warehouse_long_autostop"][0]["auto_stop_minutes"] == 90
     assert r["idle_warehouse"][0]["warehouse_id"] == "wh1"
     assert r["missing_autotermination"][0]["cluster_id"] == "c2"
@@ -87,7 +91,7 @@ def test_find_waste_degrades_when_schema_missing():
             raise RuntimeError("TABLE_OR_VIEW_NOT_FOUND system.compute.node_timeline")
         return runner(q)
     r = call(build(r2), "find_waste")
-    assert "idle_or_oversized" in r["errors"] and r["est_monthly_saving_usd"] == 168.15
+    assert "idle_or_oversized" in r["errors"] and r["measured_saving_usd"] == 168.15
 
 
 def test_explain_cost_spike(srv):
@@ -187,11 +191,12 @@ def test_mixed_prices_partial_sums_everywhere():
     assert cs["total_list_cost_usd"] == 0.37 and cs["usd_complete"] is False
     assert cs["unpriced_skus"] == [{"sku_name": "GENIE_FREE_USAGE", "unpriced_dbus": 0.326}]
     fw = call(srv, "find_waste", days=30)
-    assert fw["est_monthly_saving_usd"] == 2.75 and fw["usd_complete"] is False
+    assert fw["measured_saving_usd"] == 2.75 and fw["usd_complete"] is False
+    assert fw["projected_30d_usd"] == 5.5          # 2.75 / 15 obs days * 30
     assert {"check": "idle_warehouse", "id": "b"} in fw["unpriced_items"]
     assert {"check": "serverless_jobs", "id": "j7"} in fw["unpriced_items"]
     assert fw["unpriced_skus"][0]["sku_name"] == "GENIE_FREE_USAGE"
-    assert fw["est_monthly_waste_dbus"] == 9.43
+    assert fw["measured_waste_dbu"] == 9.43
     sp = call(srv, "explain_cost_spike", date="2026-10-26")
     assert sp["net_delta_top15_usd"] == 0.37 and sp["usd_complete"] is False and sp["net_delta_top15_dbus"] == 0.859
     tc = call(srv, "top_cost_drivers")
@@ -260,9 +265,10 @@ def test_find_waste_no_access_gives_concrete_errors_not_zero():
             raise RuntimeError("[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table 'system.compute.clusters'.")
         raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] The table or view `system`.`billing`.`usage` cannot be found.")
     r = call(build(deny), "find_waste")
-    assert r["est_monthly_saving_usd"] is None and r["est_monthly_waste_dbus"] is None  # checks failed: unknown
+    assert r["measured_saving_usd"] is None and r["measured_waste_dbu"] is None  # checks failed: unknown
+    assert r["projected_30d_usd"] is None and r["low_confidence"] is True
     assert set(r["errors"]) == {"jobs_on_all_purpose", "missing_autotermination", "idle_or_oversized",
-                                "warehouse_long_autostop", "idle_warehouse", "serverless_jobs", "unpriced_skus"}
+                                "warehouse_long_autostop", "idle_warehouse", "serverless_jobs", "unpriced_skus", "observation"}
     e = r["errors"]["warehouse_long_autostop"]
     assert e["reason"] == "permission_denied" and e["tables"] == ["system.compute.warehouses"]
     assert "GRANT SELECT ON TABLE system.compute.warehouses" in e["fix"]
@@ -280,9 +286,9 @@ def test_find_waste_row_limit():
         return many if "avg_cpu_pct" in q else []
     r = call(build(r4), "find_waste", max_rows=25)
     assert len(r["idle_or_oversized"]) == 25 and r["truncated"] == {"idle_or_oversized": {"shown": 25, "total": 500}}
-    assert r["est_monthly_saving_usd"] == 500.0   # totals over ALL 500 rows, not the 25 shown
+    assert r["measured_saving_usd"] == 500.0      # totals over ALL 500 rows, not the 25 shown
     assert r["totals_partial"] is False
-    assert all(q.rstrip().endswith("LIMIT 100001") for q in qs if "unpriced_dbus" not in q)  # safety cap only
+    assert all(q.rstrip().endswith("LIMIT 100001") for q in qs if "unpriced_dbus" not in q and "observation_days" not in q)  # safety cap only
 
 
 def test_find_waste_totals_marked_partial_when_safety_cap_hit(monkeypatch):
@@ -324,3 +330,31 @@ def test_string_booleans_from_statement_api():
     assert sp["top_movers"][1]["usd_complete"] is False
     cs = call(build(r6), "cost_summary")
     assert cs["by_product"][0]["usd_complete"] is False
+
+
+
+@pytest.mark.parametrize("obs,proj,low", [(0.0, None, True), (0.3, 30.0, True), (7.0, 1.29, False), (None, None, True)])
+def test_projection_from_observed_coverage(obs, proj, low):
+    def r7(q):
+        if "AS observation_days" in q:
+            return [{"observation_days": obs, "first_record": None}]
+        if "est_idle_dbus" in q:
+            return [{"warehouse_id": "w", "est_idle_dbus": 0.43, "est_idle_cost_usd": 0.3}]
+        return []
+    r = call(build(r7), "find_waste", days=30)
+    assert r["measured_saving_usd"] == 0.3 and r["measured_waste_dbu"] == 0.43
+    assert r["observation_days"] == obs and r["projected_30d_usd"] == proj and r["low_confidence"] is low
+    assert any("low_confidence" in n or "fewer than 7" in n for n in r.get("notes", [])) is low
+
+
+def test_projection_with_missing_price():
+    def r8(q):
+        if "AS observation_days" in q:
+            return [{"observation_days": 10.0}]
+        if "est_idle_dbus" in q:
+            return [{"warehouse_id": "a", "est_idle_dbus": 2.0, "est_idle_cost_usd": 1.4},
+                    {"warehouse_id": "b", "est_idle_dbus": 3.0, "est_idle_cost_usd": None}]
+        return []
+    r = call(build(r8), "find_waste")
+    assert r["measured_saving_usd"] == 1.4 and r["projected_30d_usd"] == 4.2 and r["usd_complete"] is False
+    assert r["projected_30d_dbu"] == 15.0 and r["low_confidence"] is False

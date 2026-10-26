@@ -28,6 +28,8 @@ def make_db(empty_prices=False):
     ) t(sku_name,cloud,usage_unit,price_start_time,price_end_time,pricing)""")
     if empty_prices:
         con.execute("DELETE FROM billing_list_prices")
+    con.execute("ALTER TABLE billing_usage ADD COLUMN usage_start_time TIMESTAMP")
+    con.execute("UPDATE billing_usage SET usage_start_time = (usage_end_time - INTERVAL 1 HOUR)::TIMESTAMP")
     # base = a whole hour ~1 day ago; wh1: up 60 min (RUNNING +1m .. STOPPED +61m), one 10 s query -> 59 idle min
     con.execute("""
     CREATE TABLE compute_warehouses AS SELECT * FROM (VALUES
@@ -129,8 +131,13 @@ def test_notebook_queries_on_mock_system_tables():
     sj = res["serverless_jobs"]; assert len(sj) == 1 and sj[0]["job_id"] == "j7"
     assert (sj[0]["runs"], sj[0]["failed_runs"]) == (4, 1) and _f(sj[0]["dbus"]) == 4.0
     assert _f(sj[0]["est_waste_dbus"]) == 1.0 and _f(sj[0]["est_saving_usd"]) == 0.5  # 1/4 of 4 DBU x $0.5
-    assert nb["summarize"](res) == 57.0           # 40 + 13.75 + 0.5 + 2.75 idle warehouse
-    assert nb["summarize_dbus"](res) == 4.93      # 3.93 idle wh + 1.0 failed run
+    # observation = earliest record in window (usage 3 days + 1 h ago) -> now, ~3.04 days
+    obs = _f(res["observation"][0]["observation_days"]); assert 3.0 <= obs <= 3.1
+    sm = nb["summarize"](res)
+    assert sm["measured_saving_usd"] == 57.0       # 40 + 13.75 + 0.5 + 2.75 idle warehouse, measured in the window
+    assert sm["measured_waste_dbu"] == 4.93        # 3.93 idle wh + 1.0 failed run
+    assert sm["observation_days"] == obs and sm["low_confidence"] is True
+    assert sm["projected_30d_usd"] == round(57.0 / obs * 30, 2) and sm["projected_30d_dbu"] == round(4.93 / obs * 30, 2)
     print("ALL TESTS PASSED")
 
 
@@ -142,12 +149,12 @@ def test_empty_list_prices_gives_unknown_usd_not_zero():
     assert {r["resource_id"] for r in res["top_cost_drivers"]} >= {"wh1", "j7"}
     assert all(r["list_cost_usd"] is None and _f(r["dbus"]) > 0 for r in res["top_cost_drivers"])
     assert res["serverless_jobs"][0]["est_saving_usd"] is None and _f(res["serverless_jobs"][0]["est_waste_dbus"]) == 1.0
-    assert nb["summarize"](res) == 0.0             # known partial sum (nothing priced) ...
+    assert nb["summarize"](res)["measured_saving_usd"] == 0.0   # known partial sum (nothing priced) ...
     u = nb["unpriced"](res)                        # ... flagged incomplete, with what is missing
     assert u["complete"] is False and "GENIE_FREE_USAGE" in u["skus"]
     assert ("idle_warehouse", "wh1") in u["items"] and ("serverless_jobs", "j7") in u["items"]
     assert res["idle_warehouse"][0]["est_idle_cost_usd"] is None
-    assert nb["summarize_dbus"](res) == 4.93
+    assert nb["summarize"](res)["measured_waste_dbu"] == 4.93
 
 
 def test_lookback_zero_no_division_by_zero(tmp_path):
@@ -157,15 +164,15 @@ def test_lookback_zero_no_division_by_zero(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="LOOKBACK_DAYS"):
         nb["render"]("cost_by_product")
-    assert nb["summarize"]({}) == 0.0               # no ZeroDivisionError
-    assert nb["summarize_dbus"]({}) == 0.0
+    sm = nb["summarize"]({})                         # no ZeroDivisionError
+    assert sm["measured_saving_usd"] == 0.0 and sm["projected_30d_usd"] is None and sm["low_confidence"] is True
 
 
 def test_mixed_prices_partial_sum_not_null():
     nb = runpy.run_path(NB)
     res = nb["run_all"](make_db())
     res["idle_warehouse"].append({"warehouse_id": "whX", "est_idle_dbus": 3.0, "est_idle_cost_usd": None})
-    assert nb["summarize"](res) == 57.0            # known amount kept
+    assert nb["summarize"](res)["measured_saving_usd"] == 57.0   # known amount kept
     u = nb["unpriced"](res)
     assert u["complete"] is False and u["items"] == [("idle_warehouse", "whX")]
 
@@ -182,3 +189,14 @@ def test_invalid_lookback_one_clear_error(bad, tmp_path, capsys):
     with pytest.raises(ValueError, match="LOOKBACK_DAYS must be an integer 1..365"):
         nb["run_all"](lambda q: calls.append(q) or [])
     assert calls == [] and "[skip]" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("obs,proj,low", [(0, None, True), (0.25, 840.0, True), (6.99, 30.04, True),
+                                          (7, 30.0, False), (30, 7.0, False), (None, None, True)])
+def test_projection_rule(obs, proj, low):
+    nb = runpy.run_path(NB)
+    rows = {"idle_or_oversized": [{"cluster_id": "c", "est_saving_usd": 7.0}],
+            "observation": [] if obs is None else [{"observation_days": obs}]}
+    sm = nb["summarize"](rows)
+    assert sm["measured_saving_usd"] == 7.0 and sm["projected_30d_usd"] == proj and sm["low_confidence"] is low
+    assert ("note" in sm) is low
