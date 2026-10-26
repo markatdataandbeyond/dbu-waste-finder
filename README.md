@@ -14,7 +14,7 @@ Landing page: https://markatdataandbeyond.github.io/dbu-waste-finder/
 |---|---|
 | Cost by product and top 20 cost drivers (jobs, warehouses, clusters) at list price | `system.billing.usage` + `system.billing.list_prices` |
 | Jobs running on all-purpose compute, with the list-price difference to job compute (ratio from your own `list_prices`) | `system.lakeflow.job_task_run_timeline` (`compute_ids`), `system.compute.clusters` |
-| All-purpose clusters with auto-termination off (0/NULL) or above 60 min | `system.compute.clusters` (latest SCD row) |
+| All-purpose clusters with auto-termination off (0/NULL) or above 60 min, incl. clusters deleted inside the window | `system.compute.clusters` (latest SCD row) |
 | Idle or oversized clusters (avg CPU < 10 % and memory < 30 %) | `system.compute.node_timeline` |
 | SQL warehouses with auto-stop off (0) or above 60 min, incl. warehouses deleted inside the window (`warehouse_long_autostop`) | `system.compute.warehouses` (latest SCD row) |
 | Idle SQL warehouses: uptime (`cluster_count` × time between events) vs minutes with a query running; flagged at ≥ 80 % idle and ≥ 30 min up, waste in DBUs from size × list price of the warehouse's billed SKU (USD NULL until its usage is in billing) (`idle_warehouse`) | `system.compute.warehouse_events`, `system.query.history`, `system.compute.warehouses` |

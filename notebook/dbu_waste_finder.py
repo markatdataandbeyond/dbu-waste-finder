@@ -70,9 +70,9 @@ WITH latest AS (
   SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id, cluster_id ORDER BY change_time DESC) AS rn
   FROM system.compute.clusters
 )
-SELECT workspace_id, cluster_id, cluster_name, owned_by, cluster_source, auto_termination_minutes
+SELECT workspace_id, cluster_id, cluster_name, owned_by, cluster_source, auto_termination_minutes, delete_time
 FROM latest
-WHERE rn = 1 AND delete_time IS NULL AND cluster_source IN ('UI', 'API')
+WHERE rn = 1 AND (delete_time IS NULL OR delete_time >= date_add(current_date(), -{d})) AND cluster_source IN ('UI', 'API')
   AND (auto_termination_minutes IS NULL OR auto_termination_minutes = 0
        OR auto_termination_minutes > {maxterm})
 ORDER BY auto_termination_minutes DESC NULLS FIRST""",

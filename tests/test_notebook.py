@@ -7,7 +7,7 @@ duckdb = __import__("pytest").importorskip("duckdb")
 NB = str(pathlib.Path(__file__).parents[1] / "notebook/dbu_waste_finder.py")
 
 
-def make_db(empty_prices=False):
+def make_db(empty_prices=False, extra=()):
     con = duckdb.connect()
     con.execute("""
     CREATE TABLE billing_usage AS SELECT * FROM (VALUES
@@ -88,6 +88,8 @@ def make_db(empty_prices=False):
            "system.lakeflow.job_run_timeline":"lakeflow_job_run_timeline",
            "system.compute.warehouses":"compute_warehouses", "system.compute.warehouse_events":"compute_warehouse_events",
            "system.query.history":"query_history"}
+    for sql in extra:
+        con.execute(sql)
     def run(q):
         sqlglot.parse_one(q, read="databricks")  # raises on Spark/Databricks syntax error
         for k, v in MAP.items(): q = q.replace(k, v)
