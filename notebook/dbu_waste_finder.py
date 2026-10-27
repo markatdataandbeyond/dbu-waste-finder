@@ -82,12 +82,24 @@ ORDER BY auto_termination_minutes DESC NULLS FIRST""",
 , ap AS (
   SELECT cluster_id, SUM(list_cost) AS ap_cost FROM priced
   WHERE billing_origin_product = 'ALL_PURPOSE' AND cluster_id IS NOT NULL GROUP BY cluster_id
-), ratio AS (
-  SELECT AVG(CASE WHEN sku_name LIKE '%JOBS_COMPUTE%' AND sku_name NOT LIKE '%SERVERLESS%' AND sku_name NOT LIKE '%PHOTON%'
-                  THEN CAST(pricing.effective_list.default AS DOUBLE) END)
-       / AVG(CASE WHEN sku_name LIKE '%ALL_PURPOSE_COMPUTE%' AND sku_name NOT LIKE '%SERVERLESS%' AND sku_name NOT LIKE '%PHOTON%'
-                  THEN CAST(pricing.effective_list.default AS DOUBLE) END) AS jobs_to_ap
-  FROM system.billing.list_prices WHERE price_end_time IS NULL AND currency_code = 'USD'
+), apsku AS (  -- the SKU + cloud this cluster is actually billed under (latest record in the window)
+  SELECT cluster_id, sku_name, cloud, usage_unit FROM (
+    SELECT usage_metadata.cluster_id AS cluster_id, sku_name, cloud, usage_unit,
+           ROW_NUMBER() OVER (PARTITION BY usage_metadata.cluster_id ORDER BY usage_end_time DESC) AS rn
+    FROM system.billing.usage
+    WHERE billing_origin_product = 'ALL_PURPOSE' AND usage_metadata.cluster_id IS NOT NULL
+      AND usage_date >= date_add(current_date(), -{d})
+  ) s WHERE rn = 1
+), ratio AS (  -- same tier, cloud and Photon flavour: *_ALL_PURPOSE_COMPUTE* -> *_JOBS_COMPUTE*; NULL if unpriced
+  SELECT s.cluster_id, s.cloud, replace(s.sku_name, 'ALL_PURPOSE_COMPUTE', 'JOBS_COMPUTE') AS jobs_sku,
+         CAST(pj.pricing.effective_list.default AS DOUBLE) / CAST(pa.pricing.effective_list.default AS DOUBLE) AS jobs_to_ap
+  FROM apsku s
+  LEFT JOIN system.billing.list_prices pa
+    ON pa.sku_name = s.sku_name AND pa.cloud = s.cloud AND pa.usage_unit = s.usage_unit
+   AND pa.price_end_time IS NULL AND pa.currency_code = 'USD'
+  LEFT JOIN system.billing.list_prices pj
+    ON pj.sku_name = replace(s.sku_name, 'ALL_PURPOSE_COMPUTE', 'JOBS_COMPUTE') AND pj.cloud = s.cloud
+   AND pj.usage_unit = s.usage_unit AND pj.price_end_time IS NULL AND pj.currency_code = 'USD'
 ), runs AS (
   SELECT DISTINCT t.workspace_id, t.job_id, c.cluster_id
   FROM system.lakeflow.job_task_run_timeline t
@@ -96,10 +108,11 @@ ORDER BY auto_termination_minutes DESC NULLS FIRST""",
   WHERE t.period_start_time >= date_add(current_date(), -{d})
 )
 SELECT r.cluster_id, COUNT(DISTINCT r.job_id) AS jobs_using_cluster,
+       MAX(x.cloud) AS cloud, MAX(x.jobs_sku) AS jobs_sku, ROUND(MAX(x.jobs_to_ap), 4) AS jobs_to_all_purpose_price_ratio,
        ROUND(MAX(a.ap_cost), 2) AS cluster_all_purpose_cost_usd,
        ROUND(MAX(a.ap_cost) * (1 - MAX(x.jobs_to_ap)), 2) AS est_saving_if_job_compute_usd
-FROM runs r JOIN ap a ON r.cluster_id = a.cluster_id CROSS JOIN ratio x
-GROUP BY r.cluster_id ORDER BY est_saving_if_job_compute_usd DESC""",
+FROM runs r JOIN ap a ON r.cluster_id = a.cluster_id LEFT JOIN ratio x ON r.cluster_id = x.cluster_id
+GROUP BY r.cluster_id ORDER BY est_saving_if_job_compute_usd DESC NULLS LAST""",
 
 "idle_or_oversized": PRICED_USAGE + """
 , util AS (
