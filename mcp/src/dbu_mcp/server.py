@@ -284,15 +284,38 @@ def build(runner: Runner | None = None) -> MCPServer:
     @mcp.tool()
     def propose_fix(bundle_yaml: str, issue: str, resource_key: str, path: str = "databricks.yml",
                     spark_version: str | None = None, node_type_id: str | None = None,
-                    num_workers: int | None = None, minutes: int | None = None) -> str:
+                    num_workers: int | None = None, minutes: int | None = None,
+                    cluster_id: str | None = None) -> str:
         """Return a unified diff for a Databricks Asset Bundle YAML. issue = 'all_purpose_job'
         (move tasks from existing_cluster_id to a job cluster) or 'no_autotermination'
         (set resources.clusters.<key>.autotermination_minutes) or 'warehouse_autostop'
         (set resources.sql_warehouses.<key>.auto_stop_mins, default 10; for long/no auto-stop or idle
-        warehouses). Nothing is applied."""
+        warehouses). Pass `cluster_id` (from find_waste) for cluster fixes: a cluster that has been deleted is
+        refused, since there is nothing left to fix. Nothing is applied."""
+        warning = ""
+        if cluster_id is not None:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(cluster_id)):
+                raise ToolError(f"cluster_id must be letters, digits, '-' or '_' (max 64), got {cluster_id!r}")
+            q = ("SELECT cluster_id, delete_time FROM (SELECT cluster_id, delete_time, ROW_NUMBER() OVER "
+                 "(PARTITION BY workspace_id, cluster_id ORDER BY change_time DESC) AS rn FROM system.compute.clusters "
+                 f"WHERE cluster_id = '{cluster_id}') x WHERE rn = 1")
+            try:
+                rows = run(q)
+            except Exception as e:
+                rows = None
+                warning = (f"# warning: could not check whether cluster {cluster_id} still exists "
+                           f"({str(e)[:120]}); review before applying.\n")
+            if rows is not None:
+                gone = [r for r in rows if r.get("delete_time")]
+                if gone and len(gone) == len(rows):
+                    raise ToolError(f"cluster {cluster_id} was deleted at {gone[0]['delete_time']}; no fix proposed "
+                                    "(nothing left to change). If the bundle still defines it, remove it there instead.")
+                if not rows:
+                    warning = (f"# warning: could not check cluster {cluster_id}: not found in system.compute.clusters "
+                               "(wrong id, or a workspace in another region); review before applying.\n")
         try:
-            return fixes.propose(bundle_yaml, issue, resource_key, path, spark_version=spark_version,
-                                 node_type_id=node_type_id, num_workers=num_workers, minutes=minutes)
+            return warning + fixes.propose(bundle_yaml, issue, resource_key, path, spark_version=spark_version,
+                                           node_type_id=node_type_id, num_workers=num_workers, minutes=minutes)
         except Exception as e:  # KeyError/ValueError/YAML errors: ToolError text reaches the client
             detail = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
             raise ToolError(detail) from None
