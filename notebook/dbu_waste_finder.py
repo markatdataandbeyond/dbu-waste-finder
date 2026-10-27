@@ -106,12 +106,33 @@ ORDER BY auto_termination_minutes DESC NULLS FIRST""",
   JOIN (SELECT DISTINCT cluster_id FROM system.compute.clusters WHERE cluster_source IN ('UI','API')) c
     ON array_contains(t.compute_ids, c.cluster_id)
   WHERE t.period_start_time >= date_add(current_date(), -{d})
+), billed AS (  -- billed all-purpose time per cluster (distinct usage intervals, so multiple SKUs per hour count once)
+  SELECT cluster_id, SUM(TIMESTAMPDIFF(SECOND, s, e)) AS billed_s FROM (
+    SELECT DISTINCT usage_metadata.cluster_id AS cluster_id, usage_start_time AS s, usage_end_time AS e
+    FROM system.billing.usage
+    WHERE billing_origin_product = 'ALL_PURPOSE' AND usage_metadata.cluster_id IS NOT NULL
+      AND usage_date >= date_add(current_date(), -{d})
+  ) b GROUP BY cluster_id
+), jobtime AS (  -- task-run time on the cluster (running tasks count until now)
+  SELECT r.cluster_id, SUM(TIMESTAMPDIFF(SECOND, t.period_start_time, COALESCE(t.period_end_time, current_timestamp()))) AS job_s
+  FROM system.lakeflow.job_task_run_timeline t
+  JOIN (SELECT DISTINCT cluster_id FROM runs) r ON array_contains(t.compute_ids, r.cluster_id)
+  WHERE t.period_start_time >= date_add(current_date(), -{d})
+  GROUP BY r.cluster_id
+), share AS (  -- share of the cluster's billed time used by job runs; parallel tasks capped at 1; NULL if unknown
+  SELECT b.cluster_id, CASE WHEN b.billed_s > 0 AND j.job_s IS NOT NULL
+                           THEN LEAST(1.0, j.job_s / b.billed_s) END AS job_share  -- LEAST skips NULLs, so guard explicitly
+  FROM billed b LEFT JOIN jobtime j ON b.cluster_id = j.cluster_id
 )
 SELECT r.cluster_id, COUNT(DISTINCT r.job_id) AS jobs_using_cluster,
        MAX(x.cloud) AS cloud, MAX(x.jobs_sku) AS jobs_sku, ROUND(MAX(x.jobs_to_ap), 4) AS jobs_to_all_purpose_price_ratio,
        ROUND(MAX(a.ap_cost), 2) AS cluster_all_purpose_cost_usd,
-       ROUND(MAX(a.ap_cost) * (1 - MAX(x.jobs_to_ap)), 2) AS est_saving_if_job_compute_usd
+       ROUND(MAX(sh.job_share), 4) AS job_share,
+       ROUND(MAX(a.ap_cost) * COALESCE(MAX(sh.job_share), 1.0) * (1 - MAX(x.jobs_to_ap)), 2) AS est_saving_if_job_compute_usd,
+       ROUND(MAX(a.ap_cost) * (1 - MAX(x.jobs_to_ap)), 2) AS est_saving_upper_bound_usd,
+       CASE WHEN MAX(sh.job_share) IS NULL THEN 'upper_bound' ELSE 'job_share' END AS saving_basis
 FROM runs r JOIN ap a ON r.cluster_id = a.cluster_id LEFT JOIN ratio x ON r.cluster_id = x.cluster_id
+LEFT JOIN share sh ON r.cluster_id = sh.cluster_id
 GROUP BY r.cluster_id ORDER BY est_saving_if_job_compute_usd DESC NULLS LAST""",
 
 "idle_or_oversized": PRICED_USAGE + """

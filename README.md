@@ -13,7 +13,7 @@ Landing page: https://markatdataandbeyond.github.io/dbu-waste-finder/
 | Check | Source tables |
 |---|---|
 | Cost by product and top 20 cost drivers (jobs, warehouses, clusters) at list price | `system.billing.usage` + `system.billing.list_prices` |
-| Jobs running on all-purpose compute, with the list-price difference to job compute (ratio from your own `list_prices`) | `system.lakeflow.job_task_run_timeline` (`compute_ids`), `system.compute.clusters` |
+| Jobs running on all-purpose compute, with the list-price difference to job compute (ratio from the cluster's own billed SKU and cloud in `list_prices`; on a shared cluster only the share of billed time used by job runs counts, the full figure is shown as `est_saving_upper_bound_usd`) | `system.lakeflow.job_task_run_timeline` (`compute_ids`), `system.compute.clusters` |
 | All-purpose clusters with auto-termination off (0/NULL) or above 60 min, incl. clusters deleted inside the window | `system.compute.clusters` (latest SCD row) |
 | Idle or oversized clusters (avg CPU < 10 % and memory < 30 %) | `system.compute.node_timeline` |
 | SQL warehouses with auto-stop off (0) or above 60 min, incl. warehouses deleted inside the window (`warehouse_long_autostop`) | `system.compute.warehouses` (latest SCD row) |

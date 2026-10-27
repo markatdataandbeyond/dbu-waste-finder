@@ -75,9 +75,9 @@ def make_db(empty_prices=False, extra=()):
     ) t(workspace_id,cluster_id,cluster_name,owned_by,cluster_source,auto_termination_minutes,change_time,delete_time)""")
     con.execute("""
     CREATE TABLE lakeflow_job_task_run_timeline AS SELECT * FROM (VALUES
-     ('w1','j1', current_timestamp-INTERVAL 1 DAY, ['c_ap']),
-     ('w1','j2', current_timestamp-INTERVAL 3 DAY, ['c_job'])
-    ) t(workspace_id,job_id,period_start_time,compute_ids)""")
+     ('w1','j1', current_timestamp-INTERVAL 1 DAY, current_timestamp-INTERVAL 1 DAY + INTERVAL 30 MINUTE, ['c_ap']),
+     ('w1','j2', current_timestamp-INTERVAL 3 DAY, current_timestamp-INTERVAL 3 DAY + INTERVAL 30 MINUTE, ['c_job'])
+    ) t(workspace_id,job_id,period_start_time,period_end_time,compute_ids)""")
     con.execute("""
     CREATE TABLE compute_node_timeline AS SELECT * FROM (VALUES
      ('c_idle', current_timestamp-INTERVAL 2 DAY, 3.0, 1.0, 12.0),
@@ -118,7 +118,9 @@ def test_notebook_queries_on_mock_system_tables():
     assert nb["unpriced"](res)["skus"] == ["GENIE_FREE_USAGE"]
     assert {r["cluster_id"] for r in res["missing_autotermination"]} == {"c_ap"}   # latest row has 0; JOB cluster ignored
     ap = res["jobs_on_all_purpose"]; assert len(ap) == 1 and ap[0]["cluster_id"] == "c_ap"
-    assert abs(ap[0]["est_saving_if_job_compute_usd"] - round(55*(1-0.15/0.55), 2)) < 0.01  # 40.0
+    # j1 used 30 of the cluster's 60 billed minutes -> job_share 0.5; full 40.0 kept as upper bound
+    assert abs(ap[0]["est_saving_if_job_compute_usd"] - round(55*0.5*(1-0.15/0.55), 2)) < 0.01  # 20.0
+    assert abs(ap[0]["est_saving_upper_bound_usd"] - round(55*(1-0.15/0.55), 2)) < 0.01  # 40.0
     idle = res["idle_or_oversized"]; assert [r["cluster_id"] for r in idle] == ["c_idle"] and idle[0]["est_saving_usd"] == 13.75
     # serverless
     # 90 > 60, 0 = never; wh3 deleted 1 day ago = inside window -> included (it burned DBUs before deletion);
@@ -137,10 +139,10 @@ def test_notebook_queries_on_mock_system_tables():
     # observation = earliest record in window (usage 3 days + 1 h ago) -> now, ~3.04 days
     obs = _f(res["observation"][0]["observation_days"]); assert 3.0 <= obs <= 3.1
     sm = nb["summarize"](res)
-    assert sm["measured_saving_usd"] == 57.0       # 40 + 13.75 + 0.5 + 2.75 idle warehouse, measured in the window
+    assert sm["measured_saving_usd"] == 37.0       # 20 + 13.75 + 0.5 + 2.75 idle warehouse, measured in the window
     assert sm["measured_waste_dbu"] == 4.93        # 3.93 idle wh + 1.0 failed run
     assert sm["observation_days"] == obs and sm["low_confidence"] is True
-    assert sm["projected_30d_usd"] == round(57.0 / obs * 30, 2) and sm["projected_30d_dbu"] == round(4.93 / obs * 30, 2)
+    assert sm["projected_30d_usd"] == round(37.0 / obs * 30, 2) and sm["projected_30d_dbu"] == round(4.93 / obs * 30, 2)
     print("ALL TESTS PASSED")
 
 
@@ -175,7 +177,7 @@ def test_mixed_prices_partial_sum_not_null():
     nb = runpy.run_path(NB)
     res = nb["run_all"](make_db())
     res["idle_warehouse"].append({"warehouse_id": "whX", "est_idle_dbus": 3.0, "est_idle_cost_usd": None})
-    assert nb["summarize"](res)["measured_saving_usd"] == 57.0   # known amount kept
+    assert nb["summarize"](res)["measured_saving_usd"] == 37.0   # known amount kept
     u = nb["unpriced"](res)
     assert u["complete"] is False and u["items"] == [("idle_warehouse", "whX")]
 
