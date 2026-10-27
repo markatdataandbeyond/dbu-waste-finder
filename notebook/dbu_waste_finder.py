@@ -339,4 +339,4 @@ if "spark" in globals():
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Want this weekly, with alerts and owner-level breakdowns? See https://dataandbeyond.dk (Pro, waitlist).
+# MAGIC Want this weekly, with alerts and owner-level breakdowns? Pro, waitlist: email mark@dataandbeyond.dk to join.

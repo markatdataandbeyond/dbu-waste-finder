@@ -39,7 +39,7 @@ def test_readme_describes_serverless_checks():
         assert k in README + (ROOT / "mcp/README.md").read_text()
 
 
-PRO = "Pro is planned (around $149/month per workspace). Not built yet \u2013 email me if you'd pay for it."
+PRO = "Pro, waitlist (around $149/month per workspace). Not built yet \u2013 email mark@dataandbeyond.dk to join the waitlist."
 
 
 def test_pro_section_exact_one_price_no_competitors():

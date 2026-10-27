@@ -20,7 +20,7 @@ where <code>system.billing.list_prices</code> has a price, an estimate at list p
 <p><small>Classic-cluster checks are tested on mock data; the warehouse and cost checks have also been run against a live
 trial workspace. Costs are list price, not your discount. Some SKUs have no list price; then the tool shows DBUs and marks USD as unknown.</small></p>
 <h2>Pro</h2>
-<p>Pro is planned (around $149/month per workspace). Not built yet – <a href="mailto:mark@dataandbeyond.dk?subject=DBU%20Waste%20Finder%20Pro">email me</a> if you'd pay for it.</p>
+<p>Pro, waitlist (around $149/month per workspace). Not built yet – email <a href="mailto:mark@dataandbeyond.dk?subject=DBU%20Waste%20Finder%20Pro">mark@dataandbeyond.dk</a> to join the waitlist.</p>
 <h2>Privacy</h2>
 <p><b>The notebook:</b> runs inside your workspace with read-only SELECT on system tables (billing and compute metadata, not your business data). Nothing is sent anywhere.</p>
 <p><b>The MCP server</b> runs on your machine, not in your workspace. It queries your system tables with a token you provide and passes the results to your AI client (e.g. Claude or Cursor), and through it to that AI provider. Results can include job, cluster and warehouse names and ids, DBUs, list-price amounts and owners' email addresses. Use a read-only service principal and only connect it to an AI client you are allowed to share that metadata with.</p>
