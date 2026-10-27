@@ -80,5 +80,5 @@ def propose(bundle_yaml: str, issue: str, resource_key: str, path: str = "databr
     elif issue == "warehouse_autostop":
         after = fix_warehouse_autostop(doc, resource_key, kw.get("minutes") or 10)
     else:
-        raise ValueError("issue must be 'all_purpose_job', 'no_autotermination' or 'warehouse_autostop'")
+        raise ValueError(f"issue must be 'all_purpose_job', 'no_autotermination' or 'warehouse_autostop', got {issue!r}")
     return _diff(before, _dump(after), path)

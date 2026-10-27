@@ -277,8 +277,12 @@ def build(runner: Runner | None = None) -> MCPServer:
         (set resources.clusters.<key>.autotermination_minutes) or 'warehouse_autostop'
         (set resources.sql_warehouses.<key>.auto_stop_mins, default 10; for long/no auto-stop or idle
         warehouses). Nothing is applied."""
-        return fixes.propose(bundle_yaml, issue, resource_key, path, spark_version=spark_version,
-                             node_type_id=node_type_id, num_workers=num_workers, minutes=minutes)
+        try:
+            return fixes.propose(bundle_yaml, issue, resource_key, path, spark_version=spark_version,
+                                 node_type_id=node_type_id, num_workers=num_workers, minutes=minutes)
+        except Exception as e:  # KeyError/ValueError/YAML errors: ToolError text reaches the client
+            detail = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
+            raise ToolError(detail) from None
 
     return mcp
 
