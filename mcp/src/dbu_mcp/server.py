@@ -242,6 +242,19 @@ def build(runner: Runner | None = None) -> MCPServer:
             out.setdefault("notes", []).append("Idle-warehouse waste = idle DBUs (size-based rate) x list price of the "
                                                "warehouse's billed SKU; USD null until its usage is in system.billing. "
                                                "Fix with propose_fix issue='warehouse_autostop'.")
+        q = queries.render(queries.REGION_GAP, days) + f"\nLIMIT {FETCH_CAP + 1}"
+        try:
+            gap = run(q)
+        except Exception as e:  # informational only: does not change the totals
+            gap = None
+            out.setdefault("warnings", {})["cluster_region_gap"] = _access_error(q, e)
+        out["cluster_region_gap"] = gap
+        if gap:
+            out.setdefault("notes", []).append(
+                "Region gap: classic-cluster usage is billed in workspaces "
+                f"{[r.get('workspace_id') for r in gap]} that are not visible in this region's system.compute tables, "
+                "so the cluster checks did not cover them (system.billing is account-wide, system.compute/lakeflow "
+                "are regional). Run against a warehouse in each region.")
         out["totals_partial"] = bool(capped)
         if capped:
             out.setdefault("notes", []).append(f"Totals are partial: {sorted(capped)} hit the {FETCH_CAP}-row fetch cap.")

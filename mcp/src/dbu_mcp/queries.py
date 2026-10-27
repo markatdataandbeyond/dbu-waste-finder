@@ -27,8 +27,9 @@ try:  # inside the repo: reuse the notebook's queries directly (single source of
     COST_BY_PRODUCT = _nb.QUERIES["cost_by_product"]
     UNPRICED = _nb.QUERIES["unpriced_skus"]
     OBSERVATION = _nb.QUERIES["observation"]
+    REGION_GAP = _nb.QUERIES["cluster_region_gap"]
 except FileNotFoundError:  # pragma: no cover - packaged install ships _vendored.py
-    from ._vendored import PRICED_USAGE, WASTE, COST_BY_PRODUCT, UNPRICED, OBSERVATION  # type: ignore
+    from ._vendored import PRICED_USAGE, WASTE, COST_BY_PRODUCT, UNPRICED, OBSERVATION, REGION_GAP  # type: ignore
 
 DAILY_COST = PRICED_USAGE + """
 SELECT usage_date, ROUND(SUM(dbus), 3) AS dbus,

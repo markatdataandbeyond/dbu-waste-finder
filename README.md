@@ -53,6 +53,7 @@ flagged incomplete (`usd_complete = false`), and the unpriced SKUs/items are lis
 - Idle-warehouse DBU/h per size (2X-Small 4 … 4X-Large 528) is the published Databricks SQL rate, an assumption; real billed DBUs are in `system.billing.usage`.
 - `system.billing.usage` lags by hours; `system.compute` and `system.query` usually land sooner, so warehouse checks can show results before cost does.
 - `usage_metadata.job_id` is not populated for jobs on all-purpose compute (per Databricks docs), so those are detected via `job_task_run_timeline.compute_ids`.
+- `system.billing` is account-wide, but `system.compute` and `system.lakeflow` only cover workspaces in the current region. Cluster usage billed in workspaces that this region can't see is listed under `cluster_region_gap` with a warning. Run the checks once per region.
 
 ## Sources (fetched 2026-10-26)
 - Billable usage: https://docs.databricks.com/aws/en/admin/system-tables/billing

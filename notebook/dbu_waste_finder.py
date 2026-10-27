@@ -135,6 +135,17 @@ FROM runs r JOIN ap a ON r.cluster_id = a.cluster_id LEFT JOIN ratio x ON r.clus
 LEFT JOIN share sh ON r.cluster_id = sh.cluster_id
 GROUP BY r.cluster_id ORDER BY est_saving_if_job_compute_usd DESC NULLS LAST""",
 
+# system.billing.* is account-wide, but system.compute.* and system.lakeflow.* only hold workspaces in THIS
+# metastore's region. Classic-cluster usage billed in a workspace that never appears in system.compute.clusters is
+# invisible to the cluster checks above: list it so the gap is explicit instead of silently "no waste".
+"cluster_region_gap": PRICED_USAGE + """
+, seen AS (SELECT DISTINCT workspace_id FROM system.compute.clusters)
+SELECT p.workspace_id, COUNT(DISTINCT p.cluster_id) AS clusters, ROUND(SUM(p.dbus), 3) AS dbus,
+       ROUND(SUM(p.list_cost), 2) AS list_cost_usd
+FROM priced p LEFT JOIN seen s ON p.workspace_id = s.workspace_id
+WHERE p.cluster_id IS NOT NULL AND p.billing_origin_product IN ('ALL_PURPOSE', 'JOBS') AND s.workspace_id IS NULL
+GROUP BY p.workspace_id ORDER BY list_cost_usd DESC NULLS LAST, p.workspace_id""",
+
 "idle_or_oversized": PRICED_USAGE + """
 , util AS (
   SELECT cluster_id, AVG(cpu_user_percent + cpu_system_percent) AS avg_cpu, AVG(mem_used_percent) AS avg_mem
@@ -369,6 +380,10 @@ if "spark" in globals():
         print(sm["note"])
     print(f"Clusters missing/long auto-termination: {len(rows.get('missing_autotermination', []))}")
     print(f"Warehouses with long/no auto-stop: {len(rows.get('warehouse_long_autostop', []))}")
+    if rows.get("cluster_region_gap"):
+        print("WARNING (region): cluster usage billed in workspaces not visible in this region's system.compute tables "
+              f"(not checked): {[(r['workspace_id'], r['list_cost_usd']) for r in rows['cluster_region_gap']]}. "
+              "Run the notebook in a workspace in each region.")
 
 # COMMAND ----------
 
