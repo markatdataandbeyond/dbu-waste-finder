@@ -324,11 +324,10 @@ def write_report(markdown: str, md_path: str | Path, *, pdf_path: str | Path | N
         return out
     pdf_path = Path(pdf_path)
     try:
-        from weasyprint import HTML  # type: ignore
-        # Minimal HTML wrap so weasyprint can render
         import html as _html
-        body = "<br/>\n".join(_html.escape(line) if line else "<br/>" for line in markdown.splitlines())
-        # Prefer simple preformatted text for fidelity without a markdown lib
+        import shutil
+        import subprocess
+        import tempfile
         html = (
             "<!doctype html><html><head><meta charset='utf-8'>"
             "<style>body{font-family:system-ui,sans-serif;font-size:11pt;line-height:1.4;"
@@ -337,7 +336,20 @@ def write_report(markdown: str, md_path: str | Path, *, pdf_path: str | Path | N
             f"</head><body><pre>{_html.escape(markdown)}</pre></body></html>"
         )
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
-        HTML(string=html).write_pdf(str(pdf_path))
+        try:
+            from weasyprint import HTML  # type: ignore
+            HTML(string=html).write_pdf(str(pdf_path))
+        except Exception:
+            cli = shutil.which("weasyprint")
+            if not cli:
+                raise
+            with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as fh:
+                fh.write(html)
+                html_file = fh.name
+            try:
+                subprocess.run([cli, html_file, str(pdf_path)], check=True, capture_output=True, text=True)
+            finally:
+                Path(html_file).unlink(missing_ok=True)
         out["pdf"] = str(pdf_path)
     except Exception as e:  # best-effort
         out["pdf"] = None
