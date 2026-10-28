@@ -6,7 +6,7 @@ from typing import Any, Callable
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import delta_maintenance, fixes, queries
+from . import cost_review, delta_maintenance, fixes, queries
 
 FETCH_CAP = 100_000  # safety cap on rows fetched per check (totals are marked partial if hit)
 Runner = Callable[[str], list[dict[str, Any]]]
@@ -110,7 +110,7 @@ def _f(x) -> float:
 def build(runner: Runner | None = None) -> MCPServer:
     mcp = MCPServer("dbu-waste-finder", instructions=(
         "Databricks cost diagnosis from system tables (list prices, read-only). "
-        "Use find_waste then propose_fix to produce a reviewable Asset Bundle diff."), version="0.1.0")
+        "Use find_waste or cost_review_report then propose_fix to produce a reviewable Asset Bundle diff."), version="0.1.0")
     state: dict[str, Runner | None] = {"run": runner}
 
     def run(q: str):
@@ -160,6 +160,31 @@ def build(runner: Runner | None = None) -> MCPServer:
         if err:
             out["errors"] = {"unpriced_skus": err}
         return out
+
+    @mcp.tool()
+    def cost_review_report(days: int = 30, max_autotermination_minutes: int = 60,
+                           warehouse_idle_pct: float = 80.0, max_rows: int = 50) -> dict:
+        """One markdown cost-review report from cost_summary + top_cost_drivers + find_waste
+        (executive summary, top drivers, waste findings with estimated savings, proposed fixes).
+        List price; proposals only — nothing is applied. Returns `{days, markdown, measured_saving_usd,
+        projected_30d_usd}`."""
+        from datetime import datetime, timezone
+        summary = cost_summary(days)
+        drivers = top_cost_drivers(days)
+        waste = find_waste(days, max_autotermination_minutes=max_autotermination_minutes,
+                           warehouse_idle_pct=warehouse_idle_pct, max_rows=max_rows)
+        md = cost_review.generate_report(
+            summary, drivers, waste,
+            as_of=datetime.now(timezone.utc).date().isoformat(),
+        )
+        return {
+            "days": days,
+            "markdown": md,
+            "measured_saving_usd": waste.get("measured_saving_usd"),
+            "projected_30d_usd": waste.get("projected_30d_usd"),
+            "observation_days": waste.get("observation_days"),
+            "usd_complete": waste.get("usd_complete"),
+        }
 
     @mcp.tool()
     def find_waste(days: int = 30, max_autotermination_minutes: int = 60,

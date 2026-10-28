@@ -62,7 +62,7 @@ def srv():
 
 def test_tools_listed(srv):
     names = {t.name for t in asyncio.run(srv.list_tools())}
-    assert names == {"cost_summary", "top_cost_drivers", "find_waste", "explain_cost_spike", "propose_fix"}
+    assert names == {"cost_summary", "top_cost_drivers", "find_waste", "explain_cost_spike", "propose_fix", "cost_review_report"}
 
 
 def test_cost_summary(srv):
