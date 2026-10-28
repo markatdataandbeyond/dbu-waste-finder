@@ -14,7 +14,7 @@ Tools:
   totals are then `null`, not $0. `days` outside 1..365 (or not an integer) gives one clear error and runs no query.
   Totals: `measured_saving_usd`/`measured_waste_dbu` (window), `observation_days` (actual data coverage), `projected_30d_usd`/`_dbu`
   (= measured ÷ observation_days × 30, null + `projection_withheld` below 3 days) and `low_confidence` (< 7 days); see root README. USD covers priced items; `usd_complete`, `unpriced_items` and `unpriced_skus` show what is missing.
-- `cost_review_report(days, …)` – one markdown cost-review (executive summary, top drivers, waste findings with estimated savings, proposed fixes) from the three tools above; proposals only.
+- `cost_review_report(days, …)` – one markdown cost-review (executive summary, top drivers, waste findings with estimated list-price amounts, proposed fixes) from the three tools above; proposals only.
 - `propose_fix(bundle_yaml, issue, resource_key, cluster_id=None)` – `all_purpose_job` | `no_autotermination` | `warehouse_autostop`
   (sets `resources.sql_warehouses.<key>.auto_stop_mins`, default 10). Returns a diff; nothing is applied. With `cluster_id`, a cluster that has been deleted is refused with a clear message.
 Costs are at list price (`system.billing.list_prices`), not your discount.
