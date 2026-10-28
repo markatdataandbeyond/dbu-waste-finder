@@ -6,7 +6,7 @@ from typing import Any, Callable
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import fixes, queries
+from . import delta_maintenance, fixes, queries
 
 FETCH_CAP = 100_000  # safety cap on rows fetched per check (totals are marked partial if hit)
 Runner = Callable[[str], list[dict[str, Any]]]
@@ -168,7 +168,9 @@ def build(runner: Runner | None = None) -> MCPServer:
         projected_30d_usd/_dbu = measured / observation_days * 30, and low_confidence (< 7 observed days).
         Classic: jobs on all-purpose compute, clusters without/with long auto-termination, idle clusters.
         Serverless: SQL warehouses with no/long auto-stop (incl. deleted in the window), idle SQL warehouses
-        (uptime vs query time), serverless job cost incl. failed runs. Max `max_rows` rows per check
+        (uptime vs query time), serverless job cost incl. failed runs. Delta: `delta_needs_optimize`
+        (small-file compaction signal), `delta_needs_vacuum` (stale/missing VACUUM), `delta_overfrequent_optimize`
+        (manual OPTIMIZE too often). Max `max_rows` rows per check
         (sorted by impact). Saving in USD is None when unknown (missing price or missing access);
         failed checks are listed under `errors` with the table and the fix."""
         days = _days(days)
@@ -177,7 +179,8 @@ def build(runner: Runner | None = None) -> MCPServer:
             raise ToolError(f"max_rows must be an integer 1..1000, got {max_rows!r}")
         out, errors, truncated, full, capped = {}, {}, {}, {}, {}
         for k in ("jobs_on_all_purpose", "missing_autotermination", "idle_or_oversized",
-                  "warehouse_long_autostop", "idle_warehouse", "serverless_jobs"):
+                  "warehouse_long_autostop", "idle_warehouse", "serverless_jobs",
+                  "delta_needs_optimize", "delta_needs_vacuum", "delta_overfrequent_optimize"):
             q = queries.render(queries.WASTE[k], days, maxterm=max_autotermination_minutes,
                                idle_pct=warehouse_idle_pct) + f"\nLIMIT {FETCH_CAP + 1}"
             try:
@@ -237,7 +240,12 @@ def build(runner: Runner | None = None) -> MCPServer:
                                "unpriced_skus" + (" and errors" if errors else ""))
         if errors:
             out.setdefault("notes", []).append(
-                f"{len([k for k in errors if k not in ('unpriced_skus', 'observation')])} of 6 checks could not run; totals cover only the checks that ran.")
+                f"{len([k for k in errors if k not in ('unpriced_skus', 'observation')])} of 9 checks could not run; totals cover only the checks that ran.")
+        if out.get("delta_needs_optimize") or out.get("delta_needs_vacuum") or out.get("delta_overfrequent_optimize"):
+            out.setdefault("notes", []).append(
+                "Delta maintenance findings are proposals only. Use propose_fix with issue="
+                "'delta_optimize'|'delta_vacuum'|'delta_zorder'|'delta_predictive_optimization'|"
+                "'delta_overfrequent_optimize' to get reviewable SQL; nothing is executed.")
         if out.get("idle_warehouse"):
             out.setdefault("notes", []).append("Idle-warehouse waste = idle DBUs (size-based rate) x list price of the "
                                                "warehouse's billed SKU; USD null until its usage is in system.billing. "
@@ -290,7 +298,10 @@ def build(runner: Runner | None = None) -> MCPServer:
         (move tasks from existing_cluster_id to a job cluster) or 'no_autotermination'
         (set resources.clusters.<key>.autotermination_minutes) or 'warehouse_autostop'
         (set resources.sql_warehouses.<key>.auto_stop_mins, default 10; for long/no auto-stop or idle
-        warehouses). Pass `cluster_id` (from find_waste) for cluster fixes: a cluster that has been deleted is
+        warehouses), or a Delta issue (`delta_optimize`|`delta_vacuum`|`delta_zorder`|`delta_predictive_optimization`|
+        `delta_overfrequent_optimize`) which returns reviewable SQL (resource_key = catalog.schema.table; for
+        `delta_zorder` pass columns as comma-separated `node_type_id`; for `delta_vacuum` pass retention hours as
+        `minutes`, default 168). Pass `cluster_id` (from find_waste) for cluster fixes: a cluster that has been deleted is
         refused, since there is nothing left to fix. Nothing is applied."""
         warning = ""
         if cluster_id is not None:
@@ -313,6 +324,18 @@ def build(runner: Runner | None = None) -> MCPServer:
                 if not rows:
                     warning = (f"# warning: could not check cluster {cluster_id}: not found in system.compute.clusters "
                                "(wrong id, or a workspace in another region); review before applying.\n")
+        if issue in delta_maintenance.ISSUES:
+            try:
+                zcols = None
+                if issue == "delta_zorder":
+                    raw = (node_type_id or spark_version or "")
+                    zcols = [c.strip() for c in raw.split(",") if c.strip()]
+                retention = int(minutes) if minutes is not None else delta_maintenance.MIN_RETENTION_HOURS
+                return delta_maintenance.propose_sql(
+                    issue, resource_key, zorder_columns=zcols, retention_hours=retention)
+            except Exception as e:
+                detail = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
+                raise ToolError(detail) from None
         try:
             return warning + fixes.propose(bundle_yaml, issue, resource_key, path, spark_version=spark_version,
                                            node_type_id=node_type_id, num_workers=num_workers, minutes=minutes)

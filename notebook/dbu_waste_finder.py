@@ -5,7 +5,7 @@
 # MAGIC
 # MAGIC Checks: top cost drivers, jobs on all-purpose compute, missing/long auto-termination,
 # MAGIC idle or oversized clusters, SQL warehouses with long/no auto-stop, idle SQL warehouses,
-# MAGIC serverless job cost (incl. failed runs), and an estimated monthly saving.
+# MAGIC serverless job cost (incl. failed runs), Delta OPTIMIZE/VACUUM needs and over-frequent OPTIMIZE, and an estimated monthly saving.
 # MAGIC
 # MAGIC If `system.billing.list_prices` has no matching price, cost columns are NULL (= **unknown**, not $0)
 # MAGIC and DBU columns are still shown.
@@ -22,6 +22,11 @@ IDLE_SAVING_SHARE = 0.5     # ASSUMPTION: right-sizing an idle cluster saves ~50
 MAX_AUTOTERM_MIN = 60       # auto-termination / warehouse auto-stop above this is flagged
 WH_IDLE_PCT = 80.0          # warehouse uptime with no query running above this % = idle
 WH_MIN_UPTIME_MIN = 30      # ignore warehouses up less than this many minutes in the window
+DELTA_MIN_FILES = 50          # min compacted/input files before flagging OPTIMIZE need
+DELTA_TARGET_FILE_BYTES = 134217728  # 128 MiB target file size
+DELTA_MAX_AVG_RATIO = 0.25   # avg file size below target * ratio => fragmented
+DELTA_VACUUM_STALE_DAYS = 14 # no VACUUM for this many days => flag
+DELTA_OPT_MAX_PER_WEEK = 3.0 # OPTIMIZE runs/week above this => over-frequent
 
 MIN_CONFIDENT_DAYS = 7      # less observed data than this -> projection is flagged low_confidence
 MIN_PROJECTION_DAYS = 3     # below this no 30-day projection is shown (projection_withheld)
@@ -266,6 +271,87 @@ SELECT s.job_id, ROUND(s.dbus, 3) AS dbus, ROUND(s.cost, 2) AS list_cost_usd,
        ROUND(s.cost * COALESCE(r.failed_runs, 0) / NULLIF(r.runs, 0), 2) AS est_saving_usd
 FROM sj s LEFT JOIN runs r ON s.job_id = r.job_id
 ORDER BY dbus DESC""",
+
+# Delta maintenance (proposals only). Predictive-optimization history for small-file /
+# stale-VACUUM signals; query.history for manual OPTIMIZE frequency.
+"delta_needs_optimize": """
+WITH comp AS (
+  SELECT catalog_name, schema_name, table_name,
+         SUM(CAST(operation_metrics['number_of_compacted_files'] AS DOUBLE)) AS files_in,
+         SUM(CAST(operation_metrics['amount_of_data_compacted_bytes'] AS DOUBLE)) AS bytes_in,
+         SUM(CAST(operation_metrics['number_of_output_files'] AS DOUBLE)) AS files_out,
+         SUM(usage_quantity) AS est_dbus,
+         COUNT(*) AS compaction_ops,
+         MAX(end_time) AS last_optimize
+  FROM system.storage.predictive_optimization_operations_history
+  WHERE operation_type = 'COMPACTION'
+    AND operation_status = 'SUCCESSFUL'
+    AND start_time >= date_add(current_date(), -{d})
+  GROUP BY catalog_name, schema_name, table_name
+)
+SELECT concat_ws('.', catalog_name, schema_name, table_name) AS table_fqn,
+       CAST(files_in AS BIGINT) AS file_count,
+       ROUND(bytes_in / NULLIF(files_in, 0), 0) AS avg_input_file_bytes,
+       CAST(files_out AS BIGINT) AS files_out,
+       compaction_ops, last_optimize,
+       ROUND(est_dbus, 3) AS est_dbus
+FROM comp
+WHERE files_in >= {min_files}
+  AND bytes_in / NULLIF(files_in, 0) < {target_file_bytes} * {max_avg_ratio}
+ORDER BY files_in DESC""",
+
+"delta_needs_vacuum": """
+WITH vac AS (
+  SELECT catalog_name, schema_name, table_name,
+         MAX(end_time) AS last_vacuum,
+         SUM(CAST(operation_metrics['amount_of_data_deleted_bytes'] AS DOUBLE)) AS bytes_deleted,
+         SUM(CAST(operation_metrics['number_of_deleted_files'] AS DOUBLE)) AS files_deleted
+  FROM system.storage.predictive_optimization_operations_history
+  WHERE operation_type = 'VACUUM'
+    AND start_time >= date_add(current_date(), -{d})
+  GROUP BY catalog_name, schema_name, table_name
+), touched AS (
+  SELECT DISTINCT catalog_name, schema_name, table_name
+  FROM system.storage.predictive_optimization_operations_history
+  WHERE start_time >= date_add(current_date(), -{d})
+)
+SELECT concat_ws('.', t.catalog_name, t.schema_name, t.table_name) AS table_fqn,
+       v.last_vacuum,
+       CASE WHEN v.last_vacuum IS NULL THEN NULL
+            ELSE ROUND(TIMESTAMPDIFF(DAY, v.last_vacuum, current_timestamp()), 1) END AS days_since_vacuum,
+       v.bytes_deleted, v.files_deleted
+FROM touched t
+LEFT JOIN vac v
+  ON t.catalog_name = v.catalog_name AND t.schema_name = v.schema_name AND t.table_name = v.table_name
+WHERE v.last_vacuum IS NULL
+   OR TIMESTAMPDIFF(DAY, v.last_vacuum, current_timestamp()) > {vacuum_stale_days}
+ORDER BY days_since_vacuum DESC NULLS FIRST""",
+
+"delta_overfrequent_optimize": """
+WITH raw AS (
+  SELECT statement_text, start_time
+  FROM system.query.history
+  WHERE start_time >= date_add(current_date(), -{d})
+    AND upper(ltrim(statement_text)) LIKE 'OPTIMIZE %'
+), parsed AS (
+  SELECT start_time,
+         lower(regexp_replace(
+           regexp_extract(upper(statement_text), 'OPTIMIZE +([A-Z0-9_`.]+)', 1),
+           '`', '')) AS table_fqn
+  FROM raw
+), agg AS (
+  SELECT table_fqn, COUNT(*) AS optimize_runs,
+         ROUND(COUNT(*) * 7.0 / {d}, 2) AS runs_per_week
+  FROM parsed
+  WHERE table_fqn IS NOT NULL AND table_fqn <> ''
+  GROUP BY table_fqn
+)
+SELECT a.table_fqn, a.optimize_runs, a.runs_per_week,
+       CAST(NULL AS STRING) AS job_id,
+       CAST(NULL AS DOUBLE) AS list_cost_usd
+FROM agg a
+WHERE a.runs_per_week > {opt_max_per_week}
+ORDER BY a.optimize_runs DESC""",
 }
 
 def validate_lookback(days):
@@ -278,7 +364,11 @@ def render(name):
     validate_lookback(LOOKBACK_DAYS)
     return QUERIES[name].format(d=int(LOOKBACK_DAYS), maxterm=int(MAX_AUTOTERM_MIN),
                                 idle_share=IDLE_SAVING_SHARE, cpu=IDLE_CPU_PCT, mem=IDLE_MEM_PCT,
-                                idle_pct=float(WH_IDLE_PCT), min_up=int(WH_MIN_UPTIME_MIN))
+                                idle_pct=float(WH_IDLE_PCT), min_up=int(WH_MIN_UPTIME_MIN),
+                                min_files=int(DELTA_MIN_FILES), target_file_bytes=int(DELTA_TARGET_FILE_BYTES),
+                                max_avg_ratio=float(DELTA_MAX_AVG_RATIO),
+                                vacuum_stale_days=int(DELTA_VACUUM_STALE_DAYS),
+                                opt_max_per_week=float(DELTA_OPT_MAX_PER_WEEK))
 
 # COMMAND ----------
 
@@ -380,6 +470,9 @@ if "spark" in globals():
         print(sm["note"])
     print(f"Clusters missing/long auto-termination: {len(rows.get('missing_autotermination', []))}")
     print(f"Warehouses with long/no auto-stop: {len(rows.get('warehouse_long_autostop', []))}")
+    print(f"Delta tables needing OPTIMIZE (small-file compaction signal): {len(rows.get('delta_needs_optimize', []))}")
+    print(f"Delta tables needing VACUUM (stale/missing): {len(rows.get('delta_needs_vacuum', []))}")
+    print(f"Over-frequent OPTIMIZE targets: {len(rows.get('delta_overfrequent_optimize', []))}")
     if rows.get("cluster_region_gap"):
         print("WARNING (region): cluster usage billed in workspaces not visible in this region's system.compute tables "
               f"(not checked): {[(r['workspace_id'], r['list_cost_usd']) for r in rows['cluster_region_gap']]}. "
@@ -388,4 +481,7 @@ if "spark" in globals():
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC Delta maintenance rows are **proposals only** (OPTIMIZE / VACUUM / ZORDER / predictive optimization).
+# MAGIC Nothing is executed — copy the SQL from `propose_fix` / the notebook and review first.
+# MAGIC
 # MAGIC Want this weekly, with alerts and owner-level breakdowns? Pro, waitlist: email mark@dataandbeyond.dk to join.

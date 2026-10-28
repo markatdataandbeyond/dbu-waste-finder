@@ -6,6 +6,9 @@ from dbu_mcp import queries, fixes, _vendored
 from dbu_mcp.server import build
 
 MOCK = {
+    "AS avg_input_file_bytes": [],  # delta_needs_optimize
+    "AS days_since_vacuum": [],     # delta_needs_vacuum
+    "AS runs_per_week": [],         # delta_overfrequent_optimize
     "AS observation_days": [{"observation_days": 15.0, "first_record": "2026-10-11T00:00:00Z"}],
     "est_idle_dbus": [{"warehouse_id": "wh1", "warehouse_size": "2X_SMALL", "uptime_min": 61.0, "busy_min": 1,
                        "idle_pct": 98.4, "est_idle_dbus": 4.0, "usd_per_dbu": 0.7, "est_idle_cost_usd": 2.8}],
@@ -268,7 +271,9 @@ def test_find_waste_no_access_gives_concrete_errors_not_zero():
     assert r["measured_saving_usd"] is None and r["measured_waste_dbu"] is None  # checks failed: unknown
     assert r["projected_30d_usd"] is None and r["low_confidence"] is True
     assert set(r["errors"]) == {"jobs_on_all_purpose", "missing_autotermination", "idle_or_oversized",
-                                "warehouse_long_autostop", "idle_warehouse", "serverless_jobs", "unpriced_skus", "observation"}
+                                "warehouse_long_autostop", "idle_warehouse", "serverless_jobs",
+                                "delta_needs_optimize", "delta_needs_vacuum", "delta_overfrequent_optimize",
+                                "unpriced_skus", "observation"}
     e = r["errors"]["warehouse_long_autostop"]
     assert e["reason"] == "permission_denied" and e["tables"] == ["system.compute.warehouses"]
     assert "GRANT SELECT ON TABLE system.compute.warehouses" in e["fix"]

@@ -23,7 +23,9 @@ try:  # inside the repo: reuse the notebook's queries directly (single source of
     PRICED_USAGE = _nb.PRICED_USAGE
     WASTE = {k: _nb.QUERIES[k] for k in ("top_cost_drivers", "missing_autotermination",
                                           "jobs_on_all_purpose", "idle_or_oversized",
-                                          "warehouse_long_autostop", "idle_warehouse", "serverless_jobs")}
+                                          "warehouse_long_autostop", "idle_warehouse", "serverless_jobs",
+                                          "delta_needs_optimize", "delta_needs_vacuum",
+                                          "delta_overfrequent_optimize")}
     COST_BY_PRODUCT = _nb.QUERIES["cost_by_product"]
     UNPRICED = _nb.QUERIES["unpriced_skus"]
     OBSERVATION = _nb.QUERIES["observation"]
@@ -77,10 +79,15 @@ def validate_days(days) -> int:
 
 
 def render(sql: str, days: int = 30, maxterm: int = 60, idle_share: float = 0.5,
-           cpu: float = 10.0, mem: float = 30.0, idle_pct: float = 80.0, min_up: int = 30) -> str:
+           cpu: float = 10.0, mem: float = 30.0, idle_pct: float = 80.0, min_up: int = 30,
+           min_files: int = 50, target_file_bytes: int = 134217728, max_avg_ratio: float = 0.25,
+           vacuum_stale_days: int = 14, opt_max_per_week: float = 3.0) -> str:
     days = validate_days(days)
     return sql.format(d=days, maxterm=int(maxterm), idle_share=float(idle_share),
-                      cpu=float(cpu), mem=float(mem), idle_pct=float(idle_pct), min_up=int(min_up))
+                      cpu=float(cpu), mem=float(mem), idle_pct=float(idle_pct), min_up=int(min_up),
+                      min_files=int(min_files), target_file_bytes=int(target_file_bytes),
+                      max_avg_ratio=float(max_avg_ratio), vacuum_stale_days=int(vacuum_stale_days),
+                      opt_max_per_week=float(opt_max_per_week))
 
 
 def render_spike(day: str) -> str:

@@ -56,9 +56,15 @@ def make_db(empty_prices=False, extra=()):
     WITH b AS (SELECT date_trunc('hour', current_timestamp - INTERVAL 1 DAY)::TIMESTAMP AS t)
     SELECT * FROM (
       SELECT 's1', {'type':'WAREHOUSE','cluster_id':NULL,'warehouse_id':'wh1'}, t + INTERVAL 5 MINUTE + INTERVAL 10 SECOND,
-             t + INTERVAL 5 MINUTE + INTERVAL 20 SECOND FROM b UNION ALL
-      SELECT 's2', {'type':'WAREHOUSE','cluster_id':NULL,'warehouse_id':'wh2'}, t, t + INTERVAL 19 MINUTE FROM b
-    ) x(statement_id, compute, start_time, end_time)""")
+             t + INTERVAL 5 MINUTE + INTERVAL 20 SECOND, 'SELECT 1' FROM b UNION ALL
+      SELECT 's2', {'type':'WAREHOUSE','cluster_id':NULL,'warehouse_id':'wh2'}, t, t + INTERVAL 19 MINUTE, 'SELECT 1' FROM b UNION ALL
+      SELECT 'o' || CAST(i AS VARCHAR),
+             {'type':'WAREHOUSE','cluster_id':NULL,'warehouse_id':'wh_opt'},
+             t + (i * INTERVAL 1 HOUR),
+             t + (i * INTERVAL 1 HOUR) + INTERVAL 1 MINUTE,
+             'OPTIMIZE main.bronze.events'
+      FROM b CROSS JOIN (SELECT unnest(range(20)) AS i) g
+    ) x(statement_id, compute, start_time, end_time, statement_text)""")
     con.execute("""
     CREATE TABLE lakeflow_job_run_timeline AS SELECT * FROM (VALUES
      ('w1','j7','r1', current_timestamp-INTERVAL 1 DAY, 'SUCCEEDED'),
@@ -83,17 +89,53 @@ def make_db(empty_prices=False, extra=()):
      ('c_idle', current_timestamp-INTERVAL 2 DAY, 3.0, 1.0, 12.0),
      ('c_ap', current_timestamp-INTERVAL 1 DAY, 60.0, 10.0, 70.0)
     ) t(cluster_id,start_time,cpu_user_percent,cpu_system_percent,mem_used_percent)""")
+
+    con.execute("""
+    CREATE TABLE storage_predictive_opt AS SELECT * FROM (VALUES
+     ('cat','bronze','events','COMPACTION','SUCCESSFUL', 400.0, 400.0*4*1024*1024, 40.0, 1.2,
+        current_timestamp - INTERVAL 2 DAY),
+     ('cat','bronze','events','VACUUM','SUCCESSFUL', NULL, NULL, NULL, 0.1,
+        current_timestamp - INTERVAL 40 DAY),
+     ('cat','silver','ok','COMPACTION','SUCCESSFUL', 10.0, 10.0*128*1024*1024, 10.0, 0.2,
+        current_timestamp - INTERVAL 1 DAY),
+     ('cat','silver','ok','VACUUM','SUCCESSFUL', NULL, NULL, NULL, 0.05,
+        current_timestamp - INTERVAL 1 DAY)
+    ) t(catalog_name, schema_name, table_name, operation_type, operation_status,
+        number_of_compacted_files, amount_of_data_compacted_bytes, number_of_output_files,
+        usage_quantity, end_time)""")
+    con.execute("ALTER TABLE storage_predictive_opt ADD COLUMN start_time TIMESTAMP")
+    con.execute("UPDATE storage_predictive_opt SET start_time = end_time - INTERVAL 10 MINUTE")
+    # map-like struct for operation_metrics so Databricks map access can be rewritten
+    con.execute("""
+    ALTER TABLE storage_predictive_opt ADD COLUMN operation_metrics STRUCT(
+      number_of_compacted_files VARCHAR, amount_of_data_compacted_bytes VARCHAR,
+      number_of_output_files VARCHAR, number_of_deleted_files VARCHAR, amount_of_data_deleted_bytes VARCHAR)
+    """)
+    con.execute("""
+    UPDATE storage_predictive_opt SET operation_metrics = {
+      'number_of_compacted_files': CAST(number_of_compacted_files AS VARCHAR),
+      'amount_of_data_compacted_bytes': CAST(amount_of_data_compacted_bytes AS VARCHAR),
+      'number_of_output_files': CAST(number_of_output_files AS VARCHAR),
+      'number_of_deleted_files': CASE WHEN operation_type='VACUUM' THEN '100' ELSE NULL END,
+      'amount_of_data_deleted_bytes': CASE WHEN operation_type='VACUUM' THEN '1000' ELSE NULL END
+    }
+    """)
+
     MAP = {"system.billing.usage":"billing_usage","system.billing.list_prices":"billing_list_prices",
            "system.compute.clusters":"compute_clusters","system.compute.node_timeline":"compute_node_timeline",
            "system.lakeflow.job_task_run_timeline":"lakeflow_job_task_run_timeline",
            "system.lakeflow.job_run_timeline":"lakeflow_job_run_timeline",
            "system.compute.warehouses":"compute_warehouses", "system.compute.warehouse_events":"compute_warehouse_events",
-           "system.query.history":"query_history"}
+           "system.query.history":"query_history",
+           "system.storage.predictive_optimization_operations_history":"storage_predictive_opt"}
     for sql in extra:
         con.execute(sql)
     def run(q):
         sqlglot.parse_one(q, read="databricks")  # raises on Spark/Databricks syntax error
         for k, v in MAP.items(): q = q.replace(k, v)
+        # DuckDB structs use dot access; Databricks map uses ['key']
+        import re as _re
+        q = _re.sub(r"operation_metrics\['([a-z_]+)'\]", r"operation_metrics.\1", q)
         d = sqlglot.transpile(q, read="databricks", write="duckdb")[0]
         cur = con.execute(d); cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
