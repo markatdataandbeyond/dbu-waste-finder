@@ -19,6 +19,7 @@ Landing page: https://markatdataandbeyond.github.io/dbu-waste-finder/
 | SQL warehouses with auto-stop off (0) or above 60 min, incl. warehouses deleted inside the window (`warehouse_long_autostop`) | `system.compute.warehouses` (latest SCD row) |
 | Idle SQL warehouses: uptime (`cluster_count` × time between events) vs minutes with a query running; flagged at ≥ 80 % idle and ≥ 30 min up, waste in DBUs from size × list price of the warehouse's billed SKU (USD NULL until its usage is in billing) (`idle_warehouse`) | `system.compute.warehouse_events`, `system.query.history`, `system.compute.warehouses` |
 | Serverless jobs: DBUs and cost per job, runs, failed runs; waste = failed-run share (`serverless_jobs`) | `system.billing.usage` (SKU contains `SERVERLESS`), `system.lakeflow.job_run_timeline` |
+| Delta tables needing `OPTIMIZE` (many small files), `VACUUM` (stale/missing), or over-frequent manual `OPTIMIZE` (proposals only; never executed) | `system.storage.predictive_optimization_operations_history`, `system.query.history` |
 | Measured waste and 30-day projection | see *How the projection works* below |
 
 If a SKU has no row in `system.billing.list_prices` (e.g. `GENIE_FREE_USAGE`), USD totals are the sum of the **priced** part,
@@ -39,6 +40,39 @@ flagged incomplete (`usd_complete = false`), and the unpriced SKUs/items are lis
   (or unknown) they are null and `projection_withheld` says why, e.g. `"need >=3 days, have 0.23"`.
 - `low_confidence: true` (plus a note) when `observation_days` < 7 (3–7 days: projection shown but flagged). Exactly 7 is not flagged.
 - This is an extrapolation of past waste at list price, not a promise of what you will get back.
+
+
+## Demo output (example data)
+
+The snippet below is **example / fixture data**, not a live workspace. It was produced by running the MCP tools
+(`cost_summary`, `top_cost_drivers`, `find_waste`, `propose_fix`) against the same mock system-table rows the
+unit tests use.
+
+```text
+cost_summary(days=15)
+  total_list_cost_usd: 1000.00  (JOBS 700 + ALL_PURPOSE 300; usd_complete=false, GENIE_FREE_USAGE unpriced)
+  daily: 2026-10-01 → $33.30
+
+top_cost_drivers(days=15)
+  job etl-nightly          $500.00
+  cluster c-shared-01      $300.00
+  warehouse wh-sql-01      $120.00
+
+find_waste(days=15)
+  measured_saving_usd: 203.15   measured_waste_dbu: 4.5
+  observation_days: 15.0        projected_30d_usd: 406.30
+  jobs_on_all_purpose:  c-shared-01  (2 jobs, est. $165 if moved to job compute)
+  missing_autotermination: c-adhoc-02  (auto_termination_minutes=0)
+  idle_or_oversized:    c-idle-03   (CPU 4 %, mem 12 %, est. $35)
+  idle_warehouse:       wh-sql-01   (98.4 % idle, 4.0 DBU → $2.80)
+  delta_needs_optimize: main.bronze.events  (500 files, ~4 MiB avg)
+  delta_needs_vacuum:   main.bronze.events  (40 days since vacuum, ~3 GiB reclaimable)
+  delta_overfrequent_optimize: main.silver.orders  (14 OPTIMIZE runs / 7 days)
+
+propose_fix(issue="delta_optimize", resource_key="main.bronze.events")
+  -- Proposal only; review before running. DBU Waste Finder never executes this.
+  OPTIMIZE main.bronze.events;
+```
 
 ## Privacy
 - **Notebook:** runs inside your workspace, read-only; nothing leaves the workspace.
