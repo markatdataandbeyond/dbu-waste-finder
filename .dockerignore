@@ -1,0 +1,16 @@
+.git
+.venv
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+mcp/build
+mcp/src/*.egg-info
+mcp/src/dbu_waste_finder_mcp.egg-info
+tests
+**/node_modules
+docs
+notebook
+*.md
+!README.md
+!mcp/README.md
+!LICENSE

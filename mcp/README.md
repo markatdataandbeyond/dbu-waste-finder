@@ -59,6 +59,17 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 ### Cursor (`.cursor/mcp.json` or `~/.cursor/mcp.json`)
 Same JSON block as above.
 
+
+## Docker
+```bash
+# from repo root
+docker build -t dbu-waste-finder-mcp .
+docker run --rm -i \
+  -e DATABRICKS_HOST=... -e DATABRICKS_TOKEN=... -e DATABRICKS_WAREHOUSE_ID=... \
+  dbu-waste-finder-mcp
+```
+The image starts the stdio MCP server (`dbu-waste-finder-mcp`). Credentials are only required when tools are called; `initialize` / `tools/list` work without them (Glama introspection).
+
 ## Tests
 `.venv/bin/pip install -e .[test] && .venv/bin/pytest -q` (mocked query results; no workspace needed).
 

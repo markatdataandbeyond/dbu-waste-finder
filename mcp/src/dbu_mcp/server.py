@@ -109,8 +109,10 @@ def _f(x) -> float:
 
 def build(runner: Runner | None = None) -> MCPServer:
     mcp = MCPServer("dbu-waste-finder", instructions=(
-        "Databricks cost diagnosis from system tables (list prices, read-only). "
-        "Use find_waste or cost_review_report then propose_fix to produce a reviewable Asset Bundle diff."), version="0.1.0")
+        "Read-only Databricks cost/waste diagnosis from system tables at list price. "
+        "Typical flow: cost_summary or top_cost_drivers for orientation, find_waste or "
+        "cost_review_report for findings, then propose_fix for a reviewable Asset Bundle "
+        "diff or Delta SQL. Never applies changes; never writes to the workspace."), version="0.1.0")
     state: dict[str, Runner | None] = {"run": runner}
 
     def run(q: str):
@@ -128,8 +130,10 @@ def build(runner: Runner | None = None) -> MCPServer:
 
     @mcp.tool()
     def cost_summary(days: int = 30) -> dict:
-        """Total list-price cost, cost per product and per day for the last `days` days. USD totals cover the
-        priced usage; `usd_complete` is false and `unpriced_skus` lists SKUs without a list price."""
+        """Orient on spend: total list-price cost, cost per product and per day for the last `days` days
+        (integer 1..365). Read-only; list price, not your discount. USD totals cover priced usage only —
+        when a SKU has no list price, `usd_complete` is false and `unpriced_skus` lists it. Use before
+        find_waste when you need the overall bill shape."""
         days = _days(days)
         try:
             q = queries.render(queries.COST_BY_PRODUCT, days); by_product = run(q)
@@ -147,7 +151,9 @@ def build(runner: Runner | None = None) -> MCPServer:
 
     @mcp.tool()
     def top_cost_drivers(days: int = 30) -> dict:
-        """Top 20 jobs/warehouses/clusters by list-price cost: {rows, usd_complete, unpriced_skus}."""
+        """Top 20 jobs, warehouses and clusters by list-price cost over the last `days` days (1..365).
+        Read-only; returns `{rows, usd_complete, unpriced_skus}`. Use to answer "what spent the most?"
+        before drilling into waste with find_waste. List price only — not applied discounts."""
         days = _days(days)
         q = queries.render(queries.WASTE["top_cost_drivers"], days)
         try:
@@ -164,10 +170,11 @@ def build(runner: Runner | None = None) -> MCPServer:
     @mcp.tool()
     def cost_review_report(days: int = 30, max_autotermination_minutes: int = 60,
                            warehouse_idle_pct: float = 80.0, max_rows: int = 50) -> dict:
-        """One markdown cost-review report from cost_summary + top_cost_drivers + find_waste
-        (executive summary, top drivers, waste findings with estimated savings, proposed fixes).
-        List price; proposals only — nothing is applied. Returns `{days, markdown, measured_saving_usd,
-        projected_30d_usd}`."""
+        """One markdown cost-review report for the last `days` days (1..365) from cost_summary +
+        top_cost_drivers + find_waste: executive summary, top drivers, waste findings with estimated
+        list-price amounts, and proposed fixes. `max_autotermination_minutes` / `warehouse_idle_pct` /
+        `max_rows` are forwarded to find_waste. Read-only; proposals only — nothing is applied.
+        Returns `{days, markdown, measured_saving_usd, projected_30d_usd}`."""
         from datetime import datetime, timezone
         summary = cost_summary(days)
         drivers = top_cost_drivers(days)
@@ -189,15 +196,15 @@ def build(runner: Runner | None = None) -> MCPServer:
     @mcp.tool()
     def find_waste(days: int = 30, max_autotermination_minutes: int = 60,
                    warehouse_idle_pct: float = 80.0, max_rows: int = 50) -> dict:
-        """Returns measured_saving_usd / measured_waste_dbu for the window, observation_days (actual data coverage),
-        projected_30d_usd/_dbu = measured / observation_days * 30, and low_confidence (< 7 observed days).
-        Classic: jobs on all-purpose compute, clusters without/with long auto-termination, idle clusters.
-        Serverless: SQL warehouses with no/long auto-stop (incl. deleted in the window), idle SQL warehouses
-        (uptime vs query time), serverless job cost incl. failed runs. Delta: `delta_needs_optimize`
-        (small-file compaction signal), `delta_needs_vacuum` (stale/missing VACUUM), `delta_overfrequent_optimize`
-        (manual OPTIMIZE too often). Max `max_rows` rows per check
-        (sorted by impact). Saving in USD is None when unknown (missing price or missing access);
-        failed checks are listed under `errors` with the table and the fix."""
+        """Find wasted DBUs over the last `days` days (1..365). Read-only; never changes the workspace.
+        Returns measured_saving_usd / measured_waste_dbu, observation_days, projected_30d_usd/_dbu
+        (= measured / observation_days * 30; withheld below 3 days) and low_confidence (< 7 days).
+        Classic: jobs on all-purpose, clusters with auto-termination off or above
+        `max_autotermination_minutes` (default 60), idle/oversized clusters. Serverless: warehouses with
+        no/long auto-stop, idle warehouses (idle_pct ≥ `warehouse_idle_pct`, default 80), serverless jobs
+        incl. failed-run share. Delta: needs OPTIMIZE / VACUUM / over-frequent OPTIMIZE (proposals only).
+        At most `max_rows` rows per check (1..1000). USD is None when unknown; failed checks go under
+        `errors` with the table and the GRANT/fix — totals are never a fake $0."""
         days = _days(days)
         max_rows = int(max_rows)
         if not 1 <= max_rows <= 1000:
@@ -299,8 +306,9 @@ def build(runner: Runner | None = None) -> MCPServer:
 
     @mcp.tool()
     def explain_cost_spike(date: str) -> dict:
-        """Which resources drove cost on `date` (YYYY-MM-DD, a UTC billing day = system.billing.usage.usage_date)
-        vs the prior 7-day daily average."""
+        """Explain a one-day cost spike: which jobs/warehouses/clusters drove list-price cost on `date`
+        (YYYY-MM-DD UTC billing day = system.billing.usage.usage_date) vs the prior 7-day daily average.
+        Read-only. Use when the user asks "why did Tuesday cost more?" after cost_summary."""
         try:
             q = queries.render_spike(date)
         except ValueError as e:
@@ -319,15 +327,15 @@ def build(runner: Runner | None = None) -> MCPServer:
                     spark_version: str | None = None, node_type_id: str | None = None,
                     num_workers: int | None = None, minutes: int | None = None,
                     cluster_id: str | None = None) -> str:
-        """Return a unified diff for a Databricks Asset Bundle YAML. issue = 'all_purpose_job'
-        (move tasks from existing_cluster_id to a job cluster) or 'no_autotermination'
-        (set resources.clusters.<key>.autotermination_minutes) or 'warehouse_autostop'
-        (set resources.sql_warehouses.<key>.auto_stop_mins, default 10; for long/no auto-stop or idle
-        warehouses), or a Delta issue (`delta_optimize`|`delta_vacuum`|`delta_zorder`|`delta_predictive_optimization`|
-        `delta_overfrequent_optimize`) which returns reviewable SQL (resource_key = catalog.schema.table; for
-        `delta_zorder` pass columns as comma-separated `node_type_id`; for `delta_vacuum` pass retention hours as
-        `minutes`, default 168). Pass `cluster_id` (from find_waste) for cluster fixes: a cluster that has been deleted is
-        refused, since there is nothing left to fix. Nothing is applied."""
+        """Propose a fix as a unified diff (Asset Bundle YAML) or reviewable SQL — never applied.
+        `issue`: 'all_purpose_job' (move tasks off existing_cluster_id onto a job cluster),
+        'no_autotermination' (set resources.clusters.<key>.autotermination_minutes),
+        'warehouse_autostop' (set resources.sql_warehouses.<key>.auto_stop_mins, default 10),
+        or Delta (`delta_optimize`|`delta_vacuum`|`delta_zorder`|`delta_predictive_optimization`|
+        `delta_overfrequent_optimize`) which returns SQL (`resource_key` = catalog.schema.table;
+        for `delta_zorder` pass columns as comma-separated `node_type_id`; for `delta_vacuum` pass
+        retention hours as `minutes`, default 168 / min 7 days). Pass `cluster_id` from find_waste for
+        cluster fixes — a deleted cluster is refused. `bundle_yaml` may be empty for Delta issues."""
         warning = ""
         if cluster_id is not None:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(cluster_id)):
