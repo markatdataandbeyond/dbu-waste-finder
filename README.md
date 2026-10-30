@@ -74,6 +74,22 @@ propose_fix(issue="delta_optimize", resource_key="main.bronze.events")
   OPTIMIZE main.bronze.events;
 ```
 
+## Live trial run (real workspace, 2026-10-29)
+
+Not fixture data. Same tools (`cost_summary`, `top_cost_drivers`, `find_waste`, `cost_review_report`) against a Databricks **trial** workspace over serverless SQL (Statement API + system tables only).
+
+![Live cost review summary — total list-price $18.17, measured idle-warehouse waste $3.50](docs/assets/live-cost-review-2026-10-29.png)
+
+| Field | Value |
+|---|---|
+| Observed days | **2.84** (30-day lookback requested) |
+| Total list-price cost | **$18.17** (`usd_complete: false` — `GENIE_FREE_USAGE` 0.326 DBU unpriced) |
+| Measured waste | **$3.50** / 5.0 DBU (`idle_warehouse` on a 2X-Small with `auto_stop_minutes=90`, idle ≈ 97.4 %) |
+| 30-day projection | **withheld** (needs ≥ 3 observed days) |
+| Classic clusters / Delta | empty on this trial — checks ran, no data |
+
+Honesty: trial workspace, little real usage, list price not a negotiated discount. Full markdown/PDF of this run lives in the local `waste-test/` folder used for TDD; the image above is the executive summary only.
+
 ## Privacy
 - **Notebook:** runs inside your workspace, read-only; nothing leaves the workspace.
 - **MCP server:** the MCP server runs on your machine, not in the workspace. It reads system tables with your token and returns the
